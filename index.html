@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Песочница</title>
+<style>
+  :root { --bg: #0c0b11; --card: #15141d; --line: #262433; --fg: #e8e4f2; --dim: #8b859c; --accent: #ffc36b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.6 system-ui, sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 56px 16px 72px; }
+  h1 { margin: 0; font-size: clamp(28px, 5vw, 42px); letter-spacing: -.01em; }
+  .lead { color: var(--dim); margin: 8px 0 40px; max-width: 560px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 18px; }
+  a.card {
+    display: flex; flex-direction: column; text-decoration: none; color: inherit;
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
+    transition: transform .15s ease, border-color .15s ease;
+  }
+  a.card[hidden] { display: none; }
+  a.card:hover { transform: translateY(-3px); border-color: #3c3850; }
+  .thumb { aspect-ratio: 16 / 10; background: #0a0a10; position: relative; overflow: hidden; }
+  .thumb img, .thumb video, .thumb canvas { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .body { padding: 14px 16px 18px; }
+  .body h2 { margin: 0 0 4px; font-size: 17px; }
+  .body p { margin: 0; color: var(--dim); font-size: 14px; }
+  .tag { display: inline-block; margin-top: 10px; font-size: 12px; color: var(--accent); border: 1px solid #4a3b1e; border-radius: 99px; padding: 1px 8px; }
+  footer { margin-top: 48px; color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Песочница</h1>
+  <p class="lead">Что получилось, когда мне сказали «делай тут что хочешь». Шесть заходов, каждый про своё.</p>
+
+  <div class="grid">
+    <a class="card" href="patterns.html">
+      <div class="thumb"><canvas id="rdThumb"></canvas></div>
+      <div class="body">
+        <h2>Узоры</h2>
+        <p>Реакция-диффузия на видеокарте: из двух чисел растут кораллы, лабиринты и делящиеся клетки. Можно рисовать.</p>
+        <span class="tag">WebGL2 · шейдеры</span>
+      </div>
+    </a>
+
+    <a class="card" href="beacon.html">
+      <div class="thumb"><canvas id="beaconThumb"></canvas></div>
+      <div class="body">
+        <h2>Смотритель</h2>
+        <p>Игра: ночью ведите лучом маяка лодки мимо рифов. Лодка видит камни, только пока на ней свет.</p>
+        <span class="tag">canvas · игра</span>
+      </div>
+    </a>
+
+    <a class="card" href="flock.html">
+      <div class="thumb"><canvas id="flockThumb"></canvas></div>
+      <div class="body">
+        <h2>Стая</h2>
+        <p>Сотни птиц по трём правилам Рейнольдса. Приманки, хищники, ползунки поведения.</p>
+        <span class="tag">canvas · симуляция</span>
+      </div>
+    </a>
+
+    <a class="card" href="tenori.html">
+      <div class="thumb"><canvas id="gridThumb"></canvas></div>
+      <div class="body">
+        <h2>Сетка звуков</h2>
+        <p>Секвенсор 16×12 в духе Tenori-on: рисуй мелодию, слушай волны. Пять ладов.</p>
+        <span class="tag">Web Audio · музыка</span>
+      </div>
+    </a>
+
+    <a class="card" href="island.png">
+      <div class="thumb"><img src="island.png" alt="Летающий остров с маяком на закате"></div>
+      <div class="body">
+        <h2>Остров с маяком</h2>
+        <p>Низкополигональная сцена в Blender, собранная целиком кодом. Файл сцены: island.blend.</p>
+        <span class="tag">Blender · 3D</span>
+      </div>
+    </a>
+
+    <a class="card" href="island_0001-0240.mp4" id="videoCard" hidden>
+      <div class="thumb"><video src="island_0001-0240.mp4" autoplay muted loop playsinline></video></div>
+      <div class="body">
+        <h2>Остров: облёт</h2>
+        <p>Десятисекундный зацикленный облёт камерой, луч маяка крутится.</p>
+        <span class="tag">Blender · анимация</span>
+      </div>
+    </a>
+  </div>
+
+  <footer>Всё лежит в одной папке, открывается без сервера и без зависимостей.</footer>
+</main>
+<script>
+  // show the video card only once the render exists
+  const v = document.querySelector('#videoCard video');
+  v.addEventListener('loadeddata', () => document.getElementById('videoCard').hidden = false);
+
+  // tiny live previews instead of screenshots
+  function fit(c) { const r = c.getBoundingClientRect(); c.width = r.width * 2; c.height = r.height * 2; return c.getContext('2d'); }
+
+  const fc = document.getElementById('flockThumb'), f = fit(fc);
+  const birds = Array.from({ length: 70 }, () => ({ x: Math.random() * fc.width, y: Math.random() * fc.height, a: Math.random() * 6.28 }));
+  const gc = document.getElementById('gridThumb'), g = fit(gc);
+  const cells = Array.from({ length: 16 }, () => Array.from({ length: 10 }, () => Math.random() < .14));
+  const bc = document.getElementById('beaconThumb'), bx = fit(bc);
+  const reefs = Array.from({ length: 11 }, () => ({ x: Math.random() * bc.width, y: Math.random() * bc.height * .75, r: 10 + Math.random() * 16 }));
+
+  function drawBeacon(t) {
+    const W = bc.width, H = bc.height, ox = W / 2, oy = H - 24, len = H * 1.3;
+    const a = -Math.PI / 2 + Math.sin(t / 1400) * 0.9, half = 0.2;
+    bx.fillStyle = '#03060c'; bx.fillRect(0, 0, W, H);
+    const cone = () => { bx.beginPath(); bx.moveTo(ox, oy); bx.arc(ox, oy, len, a - half, a + half); bx.closePath(); };
+    const grad = bx.createRadialGradient(ox, oy, 8, ox, oy, len);
+    grad.addColorStop(0, 'rgba(255,225,150,.4)'); grad.addColorStop(1, 'rgba(255,215,140,0)');
+    cone(); bx.fillStyle = grad; bx.fill();
+    bx.save(); cone(); bx.clip();
+    for (const r of reefs) {
+      bx.fillStyle = '#5b5046'; bx.strokeStyle = 'rgba(230,240,255,.5)'; bx.lineWidth = 4;
+      bx.beginPath(); bx.arc(r.x, r.y, r.r, 0, 6.28); bx.stroke(); bx.fill();
+    }
+    bx.restore();
+    bx.fillStyle = '#ffd98a'; bx.beginPath(); bx.arc(ox, oy, 9, 0, 6.28); bx.fill();
+  }
+
+  // the same Gray–Scott model as patterns.html, but tiny and on the CPU
+  const rc = document.getElementById('rdThumb'), rx = fit(rc);
+  const RW = 96, RH = 60, U = new Float32Array(RW * RH).fill(1), Vv = new Float32Array(RW * RH);
+  const U2 = new Float32Array(RW * RH), V2 = new Float32Array(RW * RH);
+  for (let s = 0; s < 14; s++) {
+    const cx = Math.random() * RW | 0, cy = Math.random() * RH | 0;
+    // seeds need to be at least ~7×7 cells, smaller ones diffuse away before they can grow
+    for (let y = -4; y <= 4; y++) for (let x = -4; x <= 4; x++) { const i = ((cy + y + RH) % RH) * RW + (cx + x + RW) % RW; U[i] = .5; Vv[i] = .25; }
+  }
+  const small = document.createElement('canvas'); small.width = RW; small.height = RH;
+  const sx = small.getContext('2d'), img = sx.createImageData(RW, RH);
+  function stepRD() {
+    for (let y = 0; y < RH; y++) for (let x = 0; x < RW; x++) {
+      const i = y * RW + x, xl = (x + RW - 1) % RW, xr = (x + 1) % RW, yu = ((y + RH - 1) % RH) * RW, yd = ((y + 1) % RH) * RW, yc = y * RW;
+      const lu = .2 * (U[yc + xl] + U[yc + xr] + U[yu + x] + U[yd + x]) + .05 * (U[yu + xl] + U[yu + xr] + U[yd + xl] + U[yd + xr]) - U[i];
+      const lv = .2 * (Vv[yc + xl] + Vv[yc + xr] + Vv[yu + x] + Vv[yd + x]) + .05 * (Vv[yu + xl] + Vv[yu + xr] + Vv[yd + xl] + Vv[yd + xr]) - Vv[i];
+      const uvv = U[i] * Vv[i] * Vv[i];
+      U2[i] = U[i] + lu - uvv + .0545 * (1 - U[i]);
+      V2[i] = Vv[i] + .5 * lv + uvv - .1165 * Vv[i];
+    }
+    U.set(U2); Vv.set(V2);
+  }
+  function drawRD() {
+    for (let k = 0; k < 6; k++) stepRD();
+    for (let i = 0; i < RW * RH; i++) {
+      const t = Math.min(1, Vv[i] / .42);
+      img.data[i * 4] = 11 + t * 244; img.data[i * 4 + 1] = 16 + t * 95; img.data[i * 4 + 2] = 38 + t * 51; img.data[i * 4 + 3] = 255;
+    }
+    sx.putImageData(img, 0, 0);
+    rx.imageSmoothingEnabled = true; rx.drawImage(small, 0, 0, rc.width, rc.height);
+  }
+
+  function frame(t) {
+    drawRD();
+    drawBeacon(t);
+    f.fillStyle = 'rgba(7,8,13,.25)'; f.fillRect(0, 0, fc.width, fc.height);
+    const flow = Math.sin(t / 2000) * .8;
+    for (const b of birds) {
+      b.a += (flow + Math.sin(b.x / 90 + t / 900) * .4 - (b.a % 6.28 - Math.PI)) * .02;
+      b.x = (b.x + Math.cos(b.a) * 2.4 + fc.width) % fc.width; b.y = (b.y + Math.sin(b.a) * 2.4 + fc.height) % fc.height;
+      f.fillStyle = `hsl(${(b.a * 57 + 200) % 360},85%,62%)`;
+      f.beginPath(); f.arc(b.x, b.y, 3, 0, 6.28); f.fill();
+    }
+    const cols = 16, rows = 10, pad = 14, gap = 5;
+    const cw = (gc.width - pad * 2 - gap * (cols - 1)) / cols, ch = (gc.height - pad * 2 - gap * (rows - 1)) / rows;
+    const head = Math.floor(t / 180) % cols;
+    g.fillStyle = '#111018'; g.fillRect(0, 0, gc.width, gc.height);
+    for (let c = 0; c < cols; c++) for (let r = 0; r < rows; r++) {
+      const on = cells[c][r], hue = (40 - r * 8 + 360) % 360;
+      g.fillStyle = on ? `hsl(${hue},95%,${c === head ? 78 : 60}%)` : `hsl(${hue},30%,${c === head ? 17 : 11}%)`;
+      g.fillRect(pad + c * (cw + gap), pad + r * (ch + gap), cw, ch);
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+</script>
+</body>
+</html>

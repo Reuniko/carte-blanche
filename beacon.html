@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Смотритель</title>
+<style>
+  :root { --bg: #03060c; --fg: #e9e4d6; --dim: #8a8faa; --warm: #ffd98a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: none; touch-action: none; }
+  #hud { position: fixed; top: 14px; left: 16px; right: 16px; display: flex; justify-content: space-between; pointer-events: none; font-variant-numeric: tabular-nums; }
+  #hud b { color: var(--warm); font-weight: 600; }
+  #overlay {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px;
+    background: radial-gradient(ellipse at center, rgba(3,6,12,.55), rgba(3,6,12,.92)); cursor: pointer;
+  }
+  #overlay.hidden { display: none; }
+  .panel { max-width: 440px; text-align: center; }
+  .panel h1 { margin: 0 0 6px; font-size: clamp(30px, 6vw, 44px); letter-spacing: .02em; color: var(--warm); font-weight: 600; }
+  .panel p { margin: 8px 0; color: var(--dim); }
+  .panel .big { color: var(--fg); font-size: 18px; }
+  .panel .go { margin-top: 20px; color: var(--fg); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .45; } }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><span id="score"></span><span id="lives"></span></div>
+<div id="overlay">
+  <div class="panel" id="panel">
+    <h1>Смотритель</h1>
+    <p class="big">Ночь. Лодки идут в гавань у маяка.</p>
+    <p>Рифы в темноте не видно ни вам, ни им. Лодка, на которую упал луч, замечает камни и обходит их. Лодка в темноте идёт напрямик.</p>
+    <p>Водите лучом мышью или пальцем. Три крушения, и смена окончена.</p>
+    <p>Лучше в наушниках. <kbd style="font:inherit;padding:0 4px;border:1px solid #3a3f55;border-radius:4px">M</kbd> — звук вкл/выкл.</p>
+    <p class="go">Клик — заступить на смену</p>
+  </div>
+</div>
+<script>
+(() => {
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  const $ = id => document.getElementById(id);
+  const TAU = Math.PI * 2;
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  let W, H, dpr, lh, harbor;
+  let state = 'menu';
+  let rocks = [], boats = [], fx = [], waves = [];
+  let score = 0, lives = 3, level = 1, spawnIn = 60, frame = 0;
+  const mouse = { x: 0, y: 0 };
+  const BEAM_HALF = 0.19, AMBIENT = 95;
+  let beamAngle = -Math.PI / 2, beamLen = 600;
+
+  let best = 0;
+  try { best = +localStorage.getItem('beacon-best') || 0; } catch (e) {}
+
+  function resize() {
+    dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    cv.width = W * dpr; cv.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    lh = { x: W / 2, y: H - 64 };
+    harbor = { x: lh.x, y: lh.y - 62 };
+    beamLen = Math.hypot(W, H) * 0.72;
+    waves = Array.from({ length: Math.round(W * H / 2600) }, () => ({ x: rand(0, W), y: rand(0, H), len: rand(6, 18), ph: rand(0, TAU) }));
+    if (!mouse.x) { mouse.x = W / 2; mouse.y = H / 3; }
+  }
+
+  // ---------- world ----------
+  function makeRock(x, y, r) {
+    const pts = Array.from({ length: 8 }, (_, i) => { const a = i / 8 * TAU; const k = rand(0.72, 1.12); return [Math.cos(a) * r * k, Math.sin(a) * r * k]; });
+    return { x, y, r, pts, sparkle: 0 };
+  }
+  function rockSpotOk(x, y, r) {
+    if (Math.hypot(x - harbor.x, y - harbor.y) < 140 + r) return false;
+    if (y > lh.y - 90) return false;
+    for (const o of rocks) if (Math.hypot(x - o.x, y - o.y) < r + o.r + 34) return false;
+    for (const b of boats) if (Math.hypot(x - b.x, y - b.y) < r + 60) return false;
+    return true;
+  }
+  function addRocks(n) {
+    for (let k = 0, tries = 0; k < n && tries < 2000; tries++) {
+      const r = rand(11, 25), x = rand(40, W - 40), y = rand(50, H - 120);
+      if (rockSpotOk(x, y, r)) { rocks.push(makeRock(x, y, r)); k++; }
+    }
+  }
+
+  function spawnBoat() {
+    const side = Math.random();
+    let x, y;
+    if (side < 0.5) { x = rand(30, W - 30); y = -14; }
+    else if (side < 0.75) { x = -14; y = rand(20, H * 0.6); }
+    else { x = W + 14; y = rand(20, H * 0.6); }
+    const a = Math.atan2(harbor.y - y, harbor.x - x);
+    const speed = rand(0.45, 0.7) + level * 0.045;
+    boats.push({ x, y, a, speed, aware: 0, seed: rand(0, 100), hue: rand(0, 360) | 0 });
+  }
+
+  function inBeam(x, y) {
+    const dx = x - lh.x, dy = y - lh.y, d = Math.hypot(dx, dy);
+    if (d < AMBIENT) return true;
+    if (d > beamLen) return false;
+    let da = Math.atan2(dy, dx) - beamAngle;
+    da = Math.atan2(Math.sin(da), Math.cos(da));
+    return Math.abs(da) < BEAM_HALF;
+  }
+
+  // ---------- sound: everything synthesised, no audio files ----------
+  const sfx = (() => {
+    let ac = null, master, fxBus, sea, muted = false;
+    try { muted = localStorage.getItem('beacon-muted') === '1'; } catch (e) {}
+    const PENTA = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24];
+
+    function noiseBuffer(sec, brown) {
+      const b = ac.createBuffer(1, ac.sampleRate * sec, ac.sampleRate), d = b.getChannelData(0);
+      let last = 0;
+      for (let i = 0; i < d.length; i++) {
+        const w = Math.random() * 2 - 1;
+        d[i] = brown ? (last = (last + 0.02 * w) / 1.02) * 3.5 : w;
+      }
+      return b;
+    }
+
+    function init() {
+      if (ac) { if (ac.state === 'suspended') ac.resume(); return; }
+      try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return; }
+      master = ac.createGain(); master.gain.value = muted ? 0 : 0.8;
+      master.connect(ac.destination);
+      // shared echo so chimes ring out over the water
+      fxBus = ac.createGain();
+      const dl = ac.createDelay(1), fb = ac.createGain(), lp = ac.createBiquadFilter();
+      dl.delayTime.value = 0.32; fb.gain.value = 0.35; lp.type = 'lowpass'; lp.frequency.value = 2200;
+      fxBus.connect(master); fxBus.connect(dl); dl.connect(lp); lp.connect(fb); fb.connect(dl); lp.connect(master);
+
+      // the sea: looping brown noise, lowpassed, swelling on a slow LFO
+      const src = ac.createBufferSource(); src.buffer = noiseBuffer(6, true); src.loop = true;
+      const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 520;
+      sea = ac.createGain(); sea.gain.value = 0;
+      const swell = ac.createGain(); swell.gain.value = 0.5;
+      const lfo = ac.createOscillator(); lfo.frequency.value = 0.09;
+      const lfoAmt = ac.createGain(); lfoAmt.gain.value = 0.35;
+      lfo.connect(lfoAmt); lfoAmt.connect(swell.gain);
+      const lfo2 = ac.createOscillator(); lfo2.frequency.value = 0.13;
+      const lfo2Amt = ac.createGain(); lfo2Amt.gain.value = 260;
+      lfo2.connect(lfo2Amt); lfo2Amt.connect(f.frequency);
+      src.connect(f); f.connect(swell); swell.connect(sea); sea.connect(master);
+      src.start(); lfo.start(); lfo2.start();
+      sea.gain.setTargetAtTime(0.32, ac.currentTime, 1.5);
+    }
+
+    function panner(x) {
+      const p = ac.createStereoPanner ? ac.createStereoPanner() : ac.createGain();
+      if (p.pan) p.pan.value = Math.max(-1, Math.min(1, (x / W) * 2 - 1)) * 0.7;
+      return p;
+    }
+
+    function bell(semi, x, when = 0, vol = 0.18) {
+      if (!ac) return;
+      const t = ac.currentTime + when, f0 = 523.25 * Math.pow(2, semi / 12);
+      const out = panner(x); out.connect(fxBus);
+      // a fundamental plus an inharmonic partial reads as "bell" rather than "beep"
+      [[1, vol], [2.76, vol * 0.35], [5.4, vol * 0.12]].forEach(([mul, v], i) => {
+        const o = ac.createOscillator(), g = ac.createGain();
+        o.type = 'sine'; o.frequency.value = f0 * mul;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(v, t + 0.005);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + (1.6 - i * 0.45));
+        o.connect(g); g.connect(out); o.start(t); o.stop(t + 1.7);
+      });
+    }
+
+    return {
+      init,
+      toggleMute() {
+        muted = !muted;
+        try { localStorage.setItem('beacon-muted', muted ? '1' : '0'); } catch (e) {}
+        if (ac) master.gain.setTargetAtTime(muted ? 0 : 0.8, ac.currentTime, 0.05);
+        return muted;
+      },
+      get muted() { return muted; },
+      saved(x, streak) { bell(PENTA[Math.min(streak, PENTA.length - 1)], x); },
+      crash(x) {
+        if (!ac) return;
+        const t = ac.currentTime, out = panner(x); out.connect(master);
+        // splintering: a noise burst with a falling lowpass
+        const n = ac.createBufferSource(); n.buffer = noiseBuffer(0.6, false);
+        const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.Q.value = 4;
+        f.frequency.setValueAtTime(2400, t); f.frequency.exponentialRampToValueAtTime(180, t + 0.45);
+        const g = ac.createGain(); g.gain.setValueAtTime(0.5, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+        n.connect(f); f.connect(g); g.connect(out); n.start(t);
+        // hull hitting stone: a short pitch-dropping thud
+        const o = ac.createOscillator(), og = ac.createGain();
+        o.frequency.setValueAtTime(95, t); o.frequency.exponentialRampToValueAtTime(38, t + 0.3);
+        og.gain.setValueAtTime(0.6, t); og.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+        o.connect(og); og.connect(out); o.start(t); o.stop(t + 0.45);
+      },
+      foghorn() {
+        if (!ac) return;
+        const t = ac.currentTime, lp = ac.createBiquadFilter(), g = ac.createGain();
+        lp.type = 'lowpass'; lp.frequency.value = 380; lp.Q.value = 2;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.22, t + 0.35);
+        g.gain.setValueAtTime(0.22, t + 1.4);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 2.4);
+        lp.connect(g); g.connect(fxBus);
+        [82.4, 82.9, 164.8].forEach(fr => {
+          const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = fr;
+          o.connect(lp); o.start(t); o.stop(t + 2.5);
+        });
+      },
+      over() { [7, 4, 0, -5].forEach((s, i) => bell(s, W / 2, i * 0.28, 0.14)); },
+    };
+  })();
+  let streak = 0;
+
+  function start() {
+    sfx.init();
+    rocks = []; boats = []; fx = []; streak = 0;
+    score = 0; lives = 3; level = 1; spawnIn = 40;
+    addRocks(Math.round(10 + W * H / 90000));
+    state = 'play';
+    $('overlay').classList.add('hidden');
+  }
+
+  function gameOver() {
+    state = 'over';
+    sfx.over();
+    const newBest = score > best;
+    if (newBest) { best = score; try { localStorage.setItem('beacon-best', best); } catch (e) {} }
+    $('panel').innerHTML = `
+      <h1>Смена окончена</h1>
+      <p class="big">Проведено лодок: <b style="color:var(--warm)">${score}</b></p>
+      <p>${newBest ? 'Это новый рекорд.' : `Рекорд: ${best}`}</p>
+      <p class="go">Клик — новая смена</p>`;
+    $('overlay').classList.remove('hidden');
+  }
+
+  // ---------- simulation ----------
+  function update(dt) {
+    frame += dt;
+    const target = Math.atan2(mouse.y - lh.y, mouse.x - lh.x);
+    // the beam has a little weight to it — it swings, it doesn't teleport
+    let d = Math.atan2(Math.sin(target - beamAngle), Math.cos(target - beamAngle));
+    beamAngle += d * Math.min(1, 0.22 * dt);
+
+    if (state !== 'play') return;
+
+    spawnIn -= dt;
+    if (spawnIn <= 0) {
+      spawnBoat();
+      spawnIn = Math.max(70, 250 - level * 17) * rand(0.7, 1.3);
+    }
+
+    for (let i = boats.length - 1; i >= 0; i--) {
+      const b = boats[i];
+      if (inBeam(b.x, b.y)) b.aware = 100;   // stays alert ~1.5 s after the light moves on
+      b.aware = Math.max(0, b.aware - dt);
+
+      let dx = harbor.x - b.x, dy = harbor.y - b.y;
+      const dist = Math.hypot(dx, dy);
+      dx /= dist; dy /= dist;
+
+      if (b.aware > 0) {
+        for (const r of rocks) {
+          const rx = r.x - b.x, ry = r.y - b.y;
+          const gap = Math.hypot(rx, ry) - r.r;
+          if (gap > 80) continue;
+          const ahead = rx * Math.cos(b.a) + ry * Math.sin(b.a);
+          if (ahead < -r.r) continue;
+          // steer sideways, toward whichever side of the rock we're already on
+          const cross = Math.cos(b.a) * ry - Math.sin(b.a) * rx;
+          const side = cross > 0 ? -1 : 1;
+          const w = (80 - gap) / 80 * 2.6;
+          dx += -Math.sin(b.a) * side * w - rx / (gap + r.r) * w * 0.4;
+          dy += Math.cos(b.a) * side * w - ry / (gap + r.r) * w * 0.4;
+        }
+      } else {
+        // in the dark: a lazy drift, no idea what's ahead
+        const wob = Math.sin(frame * 0.012 + b.seed) * 0.12;
+        dx += -dy * wob; dy += dx * wob;
+      }
+      const want = Math.atan2(dy, dx);
+      const turn = Math.atan2(Math.sin(want - b.a), Math.cos(want - b.a));
+      b.a += Math.max(-0.05, Math.min(0.05, turn)) * dt;
+      b.x += Math.cos(b.a) * b.speed * dt;
+      b.y += Math.sin(b.a) * b.speed * dt;
+
+      let hit = null;
+      for (const r of rocks) if (Math.hypot(r.x - b.x, r.y - b.y) < r.r * 0.9 + 4) { hit = r; break; }
+      if (hit) {
+        boats.splice(i, 1); lives--;
+        hit.sparkle = 240;                     // the rock that did it stays marked for a while
+        sfx.crash(b.x); streak = 0;
+        for (let k = 0; k < 18; k++) fx.push({ kind: 'debris', x: b.x, y: b.y, vx: rand(-1.4, 1.4), vy: rand(-1.4, 1.4), life: rand(50, 90), hue: b.hue });
+        fx.push({ kind: 'ring', x: b.x, y: b.y, life: 40, color: '255,90,80' });
+        if (lives <= 0) { gameOver(); return; }
+        continue;
+      }
+      if (dist < 26) {
+        boats.splice(i, 1); score++;
+        sfx.saved(harbor.x, streak++);         // each save in a row rings one note higher
+        fx.push({ kind: 'ring', x: harbor.x, y: harbor.y, life: 40, color: '140,255,190' });
+        if (score % 6 === 0) { level++; addRocks(2); sfx.foghorn(); fx.push({ kind: 'text', x: W / 2, y: H * 0.35, life: 120, text: `Уровень ${level}` }); }
+      }
+      // wandered off-screen (rare, after dodging) — just let it go without penalty
+      if (b.x < -60 || b.x > W + 60 || b.y < -80) boats.splice(i, 1);
+    }
+
+    for (let i = fx.length - 1; i >= 0; i--) {
+      const f = fx[i]; f.life -= dt;
+      if (f.kind === 'debris') { f.x += f.vx * dt; f.y += f.vy * dt; f.vx *= 0.97; f.vy *= 0.97; }
+      if (f.life <= 0) fx.splice(i, 1);
+    }
+    for (const r of rocks) {
+      if (r.sparkle > 0) r.sparkle -= dt;
+      // now and then surf breaks on a hidden rock — a hint for the attentive
+      else if (Math.random() < 0.0009 * dt) r.sparkle = 26;
+    }
+  }
+
+  // ---------- drawing ----------
+  function beamPath() {
+    ctx.beginPath();
+    ctx.moveTo(lh.x, lh.y);
+    ctx.arc(lh.x, lh.y, beamLen, beamAngle - BEAM_HALF, beamAngle + BEAM_HALF);
+    ctx.closePath();
+  }
+
+  function drawRock(r, lit) {
+    ctx.save(); ctx.translate(r.x, r.y);
+    ctx.beginPath();
+    r.pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    ctx.closePath();
+    if (lit) {
+      ctx.strokeStyle = 'rgba(230,240,255,.55)'; ctx.lineWidth = 5; ctx.stroke();   // foam
+      ctx.fillStyle = '#5b5046'; ctx.fill();
+      ctx.fillStyle = '#7a6d60';
+      ctx.beginPath(); ctx.ellipse(-r.r * .2, -r.r * .25, r.r * .45, r.r * .3, -.5, 0, TAU); ctx.fill();
+    } else {
+      const a = Math.min(1, r.sparkle / 26) * 0.5;
+      ctx.strokeStyle = `rgba(210,225,255,${a})`; ctx.lineWidth = 2; ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawBoat(b) {
+    const lit = inBeam(b.x, b.y);
+    ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(b.a);
+    // wake
+    ctx.strokeStyle = lit ? 'rgba(220,235,255,.35)' : 'rgba(120,140,180,.12)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(-9, -3); ctx.lineTo(-22, -7); ctx.moveTo(-9, 3); ctx.lineTo(-22, 7); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(11, 0); ctx.quadraticCurveTo(4, -6, -9, -5); ctx.lineTo(-9, 5); ctx.quadraticCurveTo(4, 6, 11, 0);
+    ctx.fillStyle = lit ? '#eee7da' : '#1a1f2c'; ctx.fill();
+    if (lit) { ctx.fillStyle = `hsl(${b.hue},65%,48%)`; ctx.fillRect(-7, -1.5, 13, 3); }
+    ctx.restore();
+    // masthead lantern: the one thing you can always see
+    const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, 10);
+    g.addColorStop(0, 'rgba(255,210,120,.9)'); g.addColorStop(1, 'rgba(255,210,120,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(b.x, b.y, 10, 0, TAU); ctx.fill();
+    if (b.aware > 0) {
+      ctx.strokeStyle = `rgba(255,217,138,${b.aware / 100 * 0.6})`; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(b.x, b.y, 15, 0, TAU); ctx.stroke();
+    }
+  }
+
+  function drawLighthouse() {
+    // island
+    ctx.fillStyle = '#1b2417';
+    ctx.beginPath(); ctx.ellipse(lh.x, lh.y + 10, 70, 44, 0, 0, TAU); ctx.fill();
+    ctx.strokeStyle = 'rgba(210,225,255,.25)'; ctx.lineWidth = 3; ctx.stroke();
+    // pier = the harbour
+    ctx.fillStyle = '#4a3a2a'; ctx.fillRect(harbor.x - 4, harbor.y + 4, 8, 30);
+    ctx.fillStyle = 'rgba(140,255,190,.5)';
+    ctx.beginPath(); ctx.arc(harbor.x, harbor.y, 4 + Math.sin(frame * 0.08) * 1.2, 0, TAU); ctx.fill();
+    // tower seen from above: concentric rings
+    [[22, '#d9d2c4'], [17, '#b3322a'], [12, '#d9d2c4'], [8, '#2a2a30']].forEach(([r, c]) => {
+      ctx.fillStyle = c; ctx.beginPath(); ctx.arc(lh.x, lh.y, r, 0, TAU); ctx.fill();
+    });
+    const g = ctx.createRadialGradient(lh.x, lh.y, 0, lh.x, lh.y, 40);
+    g.addColorStop(0, 'rgba(255,240,200,1)'); g.addColorStop(.25, 'rgba(255,215,140,.6)'); g.addColorStop(1, 'rgba(255,215,140,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(lh.x, lh.y, 40, 0, TAU); ctx.fill();
+  }
+
+  function draw() {
+    ctx.fillStyle = '#03060c'; ctx.fillRect(0, 0, W, H);
+
+    // sea: dim wavelets everywhere, bright ones in the light
+    ctx.lineWidth = 1.2;
+    for (const w of waves) {
+      const x = (w.x + frame * 0.15) % (W + 20) - 10;
+      const lit = inBeam(x, w.y);
+      const a = (Math.sin(frame * 0.03 + w.ph) * 0.5 + 0.5) * (lit ? 0.4 : 0.06);
+      ctx.strokeStyle = lit ? `rgba(200,220,255,${a})` : `rgba(90,110,160,${a})`;
+      ctx.beginPath(); ctx.moveTo(x, w.y); ctx.lineTo(x + w.len, w.y); ctx.stroke();
+    }
+
+    // beam
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const bg = ctx.createRadialGradient(lh.x, lh.y, 10, lh.x, lh.y, beamLen);
+    bg.addColorStop(0, 'rgba(255,225,150,.32)'); bg.addColorStop(0.5, 'rgba(255,215,140,.12)'); bg.addColorStop(1, 'rgba(255,215,140,0)');
+    beamPath(); ctx.fillStyle = bg; ctx.fill();
+    const amb = ctx.createRadialGradient(lh.x, lh.y, 0, lh.x, lh.y, AMBIENT);
+    amb.addColorStop(0, 'rgba(255,220,150,.18)'); amb.addColorStop(1, 'rgba(255,220,150,0)');
+    ctx.fillStyle = amb; ctx.beginPath(); ctx.arc(lh.x, lh.y, AMBIENT, 0, TAU); ctx.fill();
+    ctx.restore();
+
+    // rocks: faint surf everywhere, full detail only where the light falls
+    for (const r of rocks) drawRock(r, false);
+    ctx.save(); beamPath(); ctx.clip(); for (const r of rocks) drawRock(r, true); ctx.restore();
+    ctx.save(); ctx.beginPath(); ctx.arc(lh.x, lh.y, AMBIENT, 0, TAU); ctx.clip(); for (const r of rocks) drawRock(r, true); ctx.restore();
+
+    for (const b of boats) drawBoat(b);
+    drawLighthouse();
+
+    for (const f of fx) {
+      if (f.kind === 'debris') {
+        ctx.fillStyle = `hsla(${f.hue},40%,60%,${Math.min(1, f.life / 50)})`;
+        ctx.fillRect(f.x - 1.5, f.y - 1.5, 3, 3);
+      } else if (f.kind === 'ring') {
+        const k = 1 - f.life / 40;
+        ctx.strokeStyle = `rgba(${f.color},${1 - k})`; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(f.x, f.y, 6 + k * 30, 0, TAU); ctx.stroke();
+      } else if (f.kind === 'text') {
+        ctx.fillStyle = `rgba(255,217,138,${Math.min(1, f.life / 40)})`;
+        ctx.font = '600 28px system-ui, sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(f.text, f.x, f.y);
+      }
+    }
+
+    // aim marker instead of the cursor
+    ctx.strokeStyle = 'rgba(255,217,138,.5)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(mouse.x, mouse.y, 7, 0, TAU); ctx.stroke();
+
+    $('score').innerHTML = state === 'menu' ? '' : `Проведено: <b>${score}</b> · Уровень ${level}`;
+    $('lives').textContent = state === 'menu' ? '' : (sfx.muted ? '🔇 ' : '🔊 ') + '⛵'.repeat(Math.max(0, lives)) + '·'.repeat(3 - Math.max(0, lives));
+  }
+
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(3, (now - last) / 16.67); last = now;   // dt in 60fps-frames
+    update(dt); draw();
+    requestAnimationFrame(loop);
+  }
+
+  addEventListener('pointermove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+  addEventListener('pointerdown', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+  $('overlay').addEventListener('click', () => { if (state !== 'play') start(); });
+  addEventListener('keydown', e => { if (e.key.toLowerCase() === 'm' || e.key.toLowerCase() === 'ь') sfx.toggleMute(); });
+  addEventListener('resize', () => { resize(); if (state === 'play') rocks = rocks.filter(r => r.x < W && r.y < lh.y - 90); });
+
+  resize();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

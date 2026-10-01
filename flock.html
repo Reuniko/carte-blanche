@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Стая</title>
+<style>
+  :root { --bg: #07080d; --fg: #d7dbe8; --dim: #7a8196; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; font: 13px/1.5 system-ui, sans-serif; color: var(--fg); }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+  #hud {
+    position: fixed; top: 16px; left: 16px; padding: 12px 14px; max-width: 280px;
+    background: rgba(12, 14, 22, .72); border: 1px solid rgba(255,255,255,.08);
+    border-radius: 10px; backdrop-filter: blur(6px); user-select: none;
+  }
+  #hud h1 { margin: 0 0 6px; font-size: 15px; font-weight: 600; letter-spacing: .02em; }
+  #hud p { margin: 0; color: var(--dim); }
+  #hud kbd { font: inherit; color: var(--fg); padding: 0 4px; border: 1px solid rgba(255,255,255,.15); border-radius: 4px; }
+  #hud .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  #hud input[type=range] { flex: 1; accent-color: #7aa2ff; }
+  #hud label { width: 92px; color: var(--dim); }
+  #hud.hidden { display: none; }
+  #stats { margin-top: 8px; color: var(--dim); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <h1>Стая</h1>
+  <p>
+    ЛКМ — приманка, ПКМ — хищник.<br>
+    <kbd>Пробел</kbd> пауза · <kbd>T</kbd> следы · <kbd>R</kbd> сброс · <kbd>H</kbd> скрыть
+  </p>
+  <div class="row"><label>Сплочённость</label><input id="coh" type="range" min="0" max="3" step="0.05" value="1"></div>
+  <div class="row"><label>Выравнивание</label><input id="ali" type="range" min="0" max="3" step="0.05" value="1"></div>
+  <div class="row"><label>Разделение</label><input id="sep" type="range" min="0" max="3" step="0.05" value="1.4"></div>
+  <div class="row"><label>Количество</label><input id="num" type="range" min="50" max="1500" step="10" value="600"></div>
+  <div id="stats"></div>
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const $ = id => document.getElementById(id);
+  let W, H, dpr;
+
+  const cfg = {
+    view: 48, sepDist: 18, maxSpeed: 3.2, maxForce: 0.08,
+    get coh() { return +$('coh').value; },
+    get ali() { return +$('ali').value; },
+    get sep() { return +$('sep').value; },
+    get count() { return +$('num').value; },
+  };
+
+  let boids = [];
+  const attractors = [];   // {x, y, life}
+  const predators = [];    // {x, y, vx, vy}
+  let paused = false, trails = true, mouse = null;
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#07080d'; ctx.fillRect(0, 0, W, H);
+  }
+
+  function spawn() {
+    const a = Math.random() * Math.PI * 2;
+    return { x: Math.random() * W, y: Math.random() * H, vx: Math.cos(a) * 2, vy: Math.sin(a) * 2 };
+  }
+
+  function syncCount() {
+    const n = cfg.count;
+    while (boids.length < n) boids.push(spawn());
+    if (boids.length > n) boids.length = n;
+  }
+
+  // Spatial hash grid so neighbour search stays ~O(n)
+  const grid = new Map();
+  function buildGrid() {
+    grid.clear();
+    const s = cfg.view;
+    for (const b of boids) {
+      const k = ((b.x / s) | 0) + ',' + ((b.y / s) | 0);
+      let cell = grid.get(k);
+      if (!cell) grid.set(k, cell = []);
+      cell.push(b);
+    }
+  }
+
+  function limit(vx, vy, max) {
+    const m = Math.hypot(vx, vy);
+    return m > max ? [vx / m * max, vy / m * max] : [vx, vy];
+  }
+
+  function steer(b, tx, ty) {
+    // Reynolds steering: desired velocity minus current, clamped
+    const [dx, dy] = limit(tx, ty, 1e9);
+    const m = Math.hypot(dx, dy) || 1;
+    return limit(dx / m * cfg.maxSpeed - b.vx, dy / m * cfg.maxSpeed - b.vy, cfg.maxForce);
+  }
+
+  function update() {
+    buildGrid();
+    const s = cfg.view, v2 = s * s, sd2 = cfg.sepDist * cfg.sepDist;
+    const kC = cfg.coh, kA = cfg.ali, kS = cfg.sep;
+
+    for (const b of boids) {
+      let n = 0, cx = 0, cy = 0, ax = 0, ay = 0, sx = 0, sy = 0;
+      const gx = (b.x / s) | 0, gy = (b.y / s) | 0;
+      for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+        const cell = grid.get((gx + i) + ',' + (gy + j));
+        if (!cell) continue;
+        for (const o of cell) {
+          if (o === b) continue;
+          const dx = o.x - b.x, dy = o.y - b.y, d2 = dx * dx + dy * dy;
+          if (d2 > v2) continue;
+          n++; cx += o.x; cy += o.y; ax += o.vx; ay += o.vy;
+          if (d2 < sd2 && d2 > 0) { sx -= dx / d2; sy -= dy / d2; }
+        }
+      }
+      let fx = 0, fy = 0;
+      if (n) {
+        let f = steer(b, cx / n - b.x, cy / n - b.y); fx += f[0] * kC; fy += f[1] * kC;
+        f = steer(b, ax, ay); fx += f[0] * kA; fy += f[1] * kA;
+        if (sx || sy) { f = steer(b, sx, sy); fx += f[0] * kS * 1.5; fy += f[1] * kS * 1.5; }
+      }
+      for (const a of attractors) {
+        const dx = a.x - b.x, dy = a.y - b.y, d = Math.hypot(dx, dy);
+        if (d < 260) { const f = steer(b, dx, dy); const w = 1.2 * (1 - d / 260); fx += f[0] * w; fy += f[1] * w; }
+      }
+      for (const p of predators) {
+        const dx = b.x - p.x, dy = b.y - p.y, d = Math.hypot(dx, dy);
+        if (d < 120) { const f = steer(b, dx, dy); const w = 4 * (1 - d / 120); fx += f[0] * w; fy += f[1] * w; }
+      }
+      if (mouse && mouse.flee) {
+        const dx = b.x - mouse.x, dy = b.y - mouse.y, d = Math.hypot(dx, dy);
+        if (d < 100) { const f = steer(b, dx, dy); fx += f[0] * 3; fy += f[1] * 3; }
+      }
+      b.nvx = b.vx + fx; b.nvy = b.vy + fy;
+    }
+
+    for (const b of boids) {
+      [b.vx, b.vy] = limit(b.nvx, b.nvy, cfg.maxSpeed);
+      // keep a minimum speed so the flock never stalls
+      const sp = Math.hypot(b.vx, b.vy);
+      if (sp < 1.2) { b.vx *= 1.2 / (sp || 1); b.vy *= 1.2 / (sp || 1); }
+      b.x = (b.x + b.vx + W) % W;
+      b.y = (b.y + b.vy + H) % H;
+    }
+
+    for (let i = attractors.length - 1; i >= 0; i--) if (--attractors[i].life <= 0) attractors.splice(i, 1);
+
+    // Predators chase the nearest boid
+    for (const p of predators) {
+      let best = null, bd = Infinity;
+      for (const b of boids) { const d = (b.x - p.x) ** 2 + (b.y - p.y) ** 2; if (d < bd) { bd = d; best = b; } }
+      if (best) {
+        const dx = best.x - p.x, dy = best.y - p.y, m = Math.hypot(dx, dy) || 1;
+        p.vx += dx / m * 0.12; p.vy += dy / m * 0.12;
+        [p.vx, p.vy] = limit(p.vx, p.vy, cfg.maxSpeed * 0.95);
+      }
+      p.x = (p.x + p.vx + W) % W; p.y = (p.y + p.vy + H) % H;
+    }
+  }
+
+  function draw() {
+    if (trails) { ctx.fillStyle = 'rgba(7, 8, 13, 0.16)'; ctx.fillRect(0, 0, W, H); }
+    else { ctx.fillStyle = '#07080d'; ctx.fillRect(0, 0, W, H); }
+
+    ctx.globalCompositeOperation = 'lighter';
+    for (const b of boids) {
+      const ang = Math.atan2(b.vy, b.vx);
+      const hue = (ang * 180 / Math.PI + 360 + 200) % 360;
+      ctx.fillStyle = `hsla(${hue}, 85%, 62%, 0.9)`;
+      const c = Math.cos(ang), s = Math.sin(ang);
+      ctx.beginPath();
+      ctx.moveTo(b.x + c * 6, b.y + s * 6);
+      ctx.lineTo(b.x - c * 4 - s * 2.6, b.y - s * 4 + c * 2.6);
+      ctx.lineTo(b.x - c * 4 + s * 2.6, b.y - s * 4 - c * 2.6);
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+
+    for (const a of attractors) {
+      const r = 6 + Math.sin(a.life * 0.15) * 2;
+      ctx.fillStyle = `rgba(255, 214, 110, ${Math.min(1, a.life / 60)})`;
+      ctx.beginPath(); ctx.arc(a.x, a.y, r, 0, Math.PI * 2); ctx.fill();
+    }
+    for (const p of predators) {
+      const ang = Math.atan2(p.vy, p.vx), c = Math.cos(ang), s = Math.sin(ang);
+      ctx.fillStyle = '#ff4d5e';
+      ctx.beginPath();
+      ctx.moveTo(p.x + c * 14, p.y + s * 14);
+      ctx.lineTo(p.x - c * 9 - s * 7, p.y - s * 9 + c * 7);
+      ctx.lineTo(p.x - c * 9 + s * 7, p.y - s * 9 - c * 7);
+      ctx.fill();
+    }
+  }
+
+  let last = performance.now(), frames = 0, fps = 0;
+  function loop(t) {
+    syncCount();
+    if (!paused) update();
+    draw();
+    frames++;
+    if (t - last > 500) {
+      fps = Math.round(frames * 1000 / (t - last)); frames = 0; last = t;
+      $('stats').textContent = `${boids.length} птиц · ${predators.length} хищн. · ${fps} fps${paused ? ' · пауза' : ''}`;
+    }
+    requestAnimationFrame(loop);
+  }
+
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  canvas.addEventListener('pointerdown', e => {
+    if (e.button === 2) {
+      if (predators.length >= 6) predators.shift();
+      predators.push({ x: e.clientX, y: e.clientY, vx: 0, vy: 0 });
+    } else {
+      attractors.push({ x: e.clientX, y: e.clientY, life: 420 });
+    }
+  });
+  canvas.addEventListener('pointermove', e => { mouse = { x: e.clientX, y: e.clientY, flee: e.shiftKey }; });
+  canvas.addEventListener('pointerleave', () => { mouse = null; });
+
+  addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT') return;
+    const k = e.key.toLowerCase();
+    if (k === ' ') { paused = !paused; e.preventDefault(); }
+    else if (k === 't' || k === 'е') trails = !trails;
+    else if (k === 'h' || k === 'р') $('hud').classList.toggle('hidden');
+    else if (k === 'r' || k === 'к') { boids = []; attractors.length = 0; predators.length = 0; resize(); }
+  });
+  addEventListener('resize', resize);
+
+  resize();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

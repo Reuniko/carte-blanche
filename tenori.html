@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Сетка звуков</title>
+<style>
+  :root { --bg: #0b0a10; --fg: #e6e1f0; --dim: #857f96; --cell: #1a1824; --on: #ffd27a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 16px; gap: 18px; }
+  h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: .03em; }
+  canvas { touch-action: none; cursor: pointer; border-radius: 14px; flex: none; }
+  .bar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; justify-content: center; color: var(--dim); }
+  button {
+    font: inherit; color: var(--fg); background: #1d1b28; border: 1px solid #2e2b3d;
+    border-radius: 8px; padding: 6px 12px; cursor: pointer;
+  }
+  button:hover { background: #262336; }
+  button.primary { background: #3a2f18; border-color: #6b5424; color: var(--on); }
+  input[type=range] { accent-color: var(--on); width: 120px; vertical-align: middle; }
+  select { font: inherit; color: var(--fg); background: #1d1b28; border: 1px solid #2e2b3d; border-radius: 8px; padding: 5px 8px; }
+  kbd { font: inherit; color: var(--fg); padding: 0 4px; border: 1px solid #3a3650; border-radius: 4px; }
+  .hint { color: var(--dim); font-size: 13px; text-align: center; }
+</style>
+</head>
+<body>
+<h1>Сетка звуков</h1>
+<canvas id="c"></canvas>
+<div class="bar">
+  <button id="play" class="primary">▶ Играть</button>
+  <button id="rand">Случайно</button>
+  <button id="clear">Очистить</button>
+  <label>Темп <input id="bpm" type="range" min="60" max="200" value="112"></label>
+  <label>Лад
+    <select id="scale">
+      <option value="0,2,4,7,9">Пентатоника</option>
+      <option value="0,3,5,7,10">Минорная пент.</option>
+      <option value="0,2,3,5,7,8,10">Натуральный минор</option>
+      <option value="0,2,4,6,7,9,11">Лидийский</option>
+      <option value="0,1,5,7,8">Хирадзоси</option>
+    </select>
+  </label>
+</div>
+<div class="hint">Кликай и веди мышью по клеткам · <kbd>Пробел</kbd> старт/стоп · <kbd>R</kbd> случайно · <kbd>C</kbd> очистить</div>
+<script>
+(() => {
+  const COLS = 16, ROWS = 12;
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const $ = id => document.getElementById(id);
+
+  let grid = Array.from({ length: COLS }, () => new Array(ROWS).fill(false));
+  let cell, gap, pad, size;
+  let playing = false, step = -1, nextTime = 0;
+  const ripples = [];   // {c, r, t0}
+  const flashes = [];   // per-cell glow {c, r, t0}
+
+  function layout() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    // leave room for the title, controls and hint around the grid
+    const avail = Math.max(240, Math.min(document.documentElement.clientWidth - 32, (innerHeight - 250) * COLS / ROWS, 960));
+    pad = 14; gap = Math.max(3, avail / COLS * 0.12);
+    cell = (avail - pad * 2 - gap * (COLS - 1)) / COLS;
+    const w = pad * 2 + cell * COLS + gap * (COLS - 1);
+    const h = pad * 2 + cell * ROWS + gap * (ROWS - 1);
+    size = { w, h };
+    canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+    canvas.width = w * dpr; canvas.height = h * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  const cx = c => pad + c * (cell + gap);
+  const cy = r => pad + r * (cell + gap);
+
+  // ---------- audio ----------
+  let ac, master, delay;
+  function initAudio() {
+    if (ac) return;
+    ac = new (window.AudioContext || window.webkitAudioContext)();
+    master = ac.createGain(); master.gain.value = 0.5;
+    const comp = ac.createDynamicsCompressor();
+    // feedback delay gives the grid an airy, ambient tail
+    delay = ac.createDelay(1.5);
+    const fb = ac.createGain(); fb.gain.value = 0.38;
+    const tone = ac.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = 2400;
+    const wet = ac.createGain(); wet.gain.value = 0.35;
+    master.connect(comp);
+    master.connect(delay); delay.connect(tone); tone.connect(fb); fb.connect(delay); tone.connect(wet); wet.connect(comp);
+    comp.connect(ac.destination);
+  }
+
+  function freqFor(row) {
+    const scale = $('scale').value.split(',').map(Number);
+    const idx = ROWS - 1 - row;                  // bottom row = lowest note
+    const oct = Math.floor(idx / scale.length);
+    const semi = scale[idx % scale.length] + 12 * oct;
+    return 220 * Math.pow(2, (semi - 3) / 12);   // anchored around C4
+  }
+
+  function pluck(row, t, vel = 1) {
+    const f = freqFor(row);
+    const o1 = ac.createOscillator(), o2 = ac.createOscillator();
+    o1.type = 'sine'; o2.type = 'triangle';
+    o1.frequency.value = f; o2.frequency.value = f * 2.001;
+    const g = ac.createGain(), g2 = ac.createGain();
+    g2.gain.value = 0.18;
+    const peak = 0.22 * vel / Math.sqrt(1 + activeInColumn(step) * 0.6);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(peak, t + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 1.4);
+    o1.connect(g); o2.connect(g2); g2.connect(g); g.connect(master);
+    o1.start(t); o2.start(t); o1.stop(t + 1.5); o2.stop(t + 1.5);
+  }
+
+  function activeInColumn(c) {
+    if (c < 0) return 0;
+    let n = 0; for (let r = 0; r < ROWS; r++) if (grid[c][r]) n++; return n;
+  }
+
+  function stepDur() { return 60 / +$('bpm').value / 2; }  // eighth notes
+
+  function scheduler() {
+    if (!playing) return;
+    while (nextTime < ac.currentTime + 0.1) {
+      step = (step + 1) % COLS;
+      const s = step, when = nextTime;
+      for (let r = 0; r < ROWS; r++) if (grid[s][r]) {
+        pluck(r, when);
+        const delayMs = Math.max(0, (when - ac.currentTime) * 1000);
+        setTimeout(() => { const t0 = performance.now(); ripples.push({ c: s, r, t0 }); flashes.push({ c: s, r, t0 }); }, delayMs);
+      }
+      nextTime += stepDur();
+    }
+    setTimeout(scheduler, 25);
+  }
+
+  function togglePlay() {
+    initAudio();
+    if (ac.state === 'suspended') ac.resume();
+    playing = !playing;
+    $('play').textContent = playing ? '❚❚ Пауза' : '▶ Играть';
+    if (playing) { nextTime = ac.currentTime + 0.05; scheduler(); }
+  }
+
+  // ---------- drawing ----------
+  let visualStep = -1, lastStepAt = 0;
+  function draw(now) {
+    ctx.clearRect(0, 0, size.w, size.h);
+    ctx.fillStyle = '#111018';
+    roundRect(0, 0, size.w, size.h, 14); ctx.fill();
+
+    // playhead column highlight follows audio clock
+    if (playing && ac) {
+      const elapsed = ac.currentTime - (nextTime - stepDur());
+      visualStep = elapsed >= 0 ? step : (step - 1 + COLS) % COLS;
+    }
+
+    // ripple energy per cell
+    const energy = new Float32Array(COLS * ROWS);
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const rp = ripples[i], age = (now - rp.t0) / 1000;
+      if (age > 1.2) { ripples.splice(i, 1); continue; }
+      const radius = age * 7;
+      for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
+        const d = Math.hypot(c - rp.c, r - rp.r);
+        const e = Math.max(0, 1 - Math.abs(d - radius) / 1.1) * (1 - age / 1.2) * 0.5;
+        energy[c * ROWS + r] += e;
+      }
+    }
+    const flash = new Float32Array(COLS * ROWS);
+    for (let i = flashes.length - 1; i >= 0; i--) {
+      const f = flashes[i], age = (now - f.t0) / 1000;
+      if (age > 0.5) { flashes.splice(i, 1); continue; }
+      flash[f.c * ROWS + f.r] = Math.max(flash[f.c * ROWS + f.r], 1 - age / 0.5);
+    }
+
+    for (let c = 0; c < COLS; c++) {
+      const head = playing && c === visualStep;
+      for (let r = 0; r < ROWS; r++) {
+        const x = cx(c), y = cy(r), on = grid[c][r];
+        const e = Math.min(1, energy[c * ROWS + r]), fl = flash[c * ROWS + r];
+        const hue = 40 + (r / ROWS) * -80 + 360;   // warm top → pink bottom
+        if (on) {
+          const l = 62 + fl * 20;
+          ctx.fillStyle = `hsl(${hue % 360}, 95%, ${l}%)`;
+          if (fl > 0) { ctx.shadowColor = `hsl(${hue % 360}, 100%, 65%)`; ctx.shadowBlur = 24 * fl; }
+        } else {
+          const base = head ? 16 : 11;
+          ctx.fillStyle = `hsl(${hue % 360}, ${30 + e * 60}%, ${base + e * 30}%)`;
+        }
+        const shrink = on ? 0 : e * -cell * 0.06;
+        roundRect(x - shrink, y - shrink, cell + shrink * 2, cell + shrink * 2, cell * 0.22);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+    }
+    requestAnimationFrame(draw);
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+
+  // ---------- input ----------
+  let painting = null; // true = turning cells on, false = off
+  function hit(e) {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left - pad, y = e.clientY - rect.top - pad;
+    const c = Math.floor(x / (cell + gap)), r = Math.floor(y / (cell + gap));
+    if (c < 0 || r < 0 || c >= COLS || r >= ROWS) return null;
+    return [c, r];
+  }
+  function paint(e) {
+    const h = hit(e); if (!h) return;
+    const [c, r] = h;
+    if (painting === null) painting = !grid[c][r];
+    if (grid[c][r] !== painting) {
+      grid[c][r] = painting;
+      if (painting && ac) { pluck(r, ac.currentTime, 0.7); flashes.push({ c, r, t0: performance.now() }); }
+    }
+  }
+  canvas.addEventListener('pointerdown', e => { initAudio(); if (ac.state === 'suspended') ac.resume(); canvas.setPointerCapture(e.pointerId); painting = null; paint(e); });
+  canvas.addEventListener('pointermove', e => { if (e.buttons) paint(e); });
+  canvas.addEventListener('pointerup', () => { painting = null; });
+
+  function randomize() {
+    grid = grid.map(() => new Array(ROWS).fill(false));
+    // a gentle random walk reads more like a melody than pure noise
+    let r = Math.floor(ROWS / 2);
+    for (let c = 0; c < COLS; c++) {
+      if (Math.random() < 0.8) grid[c][r] = true;
+      if (Math.random() < 0.2) grid[c][Math.min(ROWS - 1, r + 4)] = true;
+      r = Math.max(0, Math.min(ROWS - 1, r + Math.round((Math.random() - 0.5) * 4)));
+    }
+  }
+
+  $('play').onclick = togglePlay;
+  $('rand').onclick = randomize;
+  $('clear').onclick = () => { grid = grid.map(() => new Array(ROWS).fill(false)); };
+  addEventListener('keydown', e => {
+    if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+    const k = e.key.toLowerCase();
+    if (k === ' ') { e.preventDefault(); togglePlay(); }
+    else if (k === 'r' || k === 'к') randomize();
+    else if (k === 'c' || k === 'с') $('clear').onclick();
+  });
+  addEventListener('resize', layout);
+
+  layout();
+  randomize();
+  requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>

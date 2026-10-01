@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Черепашка</title>
+<style>
+  :root { --bg: #0f1013; --panel: #16171c; --line: #262833; --fg: #e6e4dc; --dim: #8b8a93; --accent: #8fd18a; --err: #ff7a6b; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
+  body { display: grid; grid-template-columns: minmax(300px, 420px) 1fr; height: 100vh; }
+  @media (max-width: 760px) { body { grid-template-columns: 1fr; grid-template-rows: auto 55vh; height: auto; } }
+  aside { display: flex; flex-direction: column; border-right: 1px solid var(--line); background: var(--panel); min-height: 0; }
+  header { padding: 14px 16px 10px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0; font-size: 17px; font-weight: 600; }
+  h1 span { color: var(--accent); }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; }
+  button, select { font: inherit; color: var(--fg); background: #1e2027; border: 1px solid var(--line); border-radius: 7px; padding: 4px 10px; cursor: pointer; }
+  button:hover { background: #262833; }
+  button.go { background: #22361f; border-color: #3b5e35; color: var(--accent); }
+  label { color: var(--dim); display: flex; align-items: center; gap: 6px; }
+  input[type=range] { width: 90px; accent-color: var(--accent); }
+  textarea {
+    flex: 1; min-height: 260px; resize: none; border: 0; outline: none; padding: 14px 16px; tab-size: 2;
+    background: transparent; color: var(--fg); font: 14px/1.6 ui-monospace, Consolas, monospace;
+  }
+  #status { padding: 8px 16px; border-top: 1px solid var(--line); color: var(--dim); font-size: 13px; min-height: 38px; }
+  #status.err { color: var(--err); }
+  details { border-top: 1px solid var(--line); padding: 8px 16px 12px; color: var(--dim); font-size: 13px; }
+  summary { cursor: pointer; color: var(--fg); }
+  details code { color: var(--accent); font-family: ui-monospace, Consolas, monospace; }
+  details table { border-collapse: collapse; margin-top: 6px; }
+  details td { padding: 1px 10px 1px 0; vertical-align: top; }
+  main { position: relative; min-height: 0; background: radial-gradient(circle at 50% 45%, #1a1c22, #0c0d10 75%); }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<aside>
+  <header>
+    <h1>Черепашка <span>🐢</span></h1>
+    <div class="bar">
+      <button class="go" id="run">▶ Запуск</button>
+      <button id="stop">■ Стоп</button>
+      <select id="examples"></select>
+      <label>Скорость <input id="speed" type="range" min="1" max="100" value="70"></label>
+    </div>
+  </header>
+  <textarea id="code" spellcheck="false"></textarea>
+  <div id="status">Ctrl+Enter — запуск</div>
+  <details>
+    <summary>Справка по языку</summary>
+    <table>
+      <tr><td><code>вперёд 100</code>, <code>назад 50</code></td><td>шаг (кратко <code>вп</code>, <code>нд</code>)</td></tr>
+      <tr><td><code>налево 90</code>, <code>направо 45</code></td><td>поворот в градусах (<code>лв</code>, <code>пр</code>)</td></tr>
+      <tr><td><code>повтори 4 [ … ]</code></td><td>цикл; внутри <code>:номер</code> — счётчик с 1</td></tr>
+      <tr><td><code>если :x &gt; 5 [ … ] иначе [ … ]</code></td><td>условие, <code>иначе</code> можно опустить</td></tr>
+      <tr><td><code>это имя :а :б … конец</code></td><td>своя команда с параметрами</td></tr>
+      <tr><td><code>стоп</code></td><td>выйти из своей команды</td></tr>
+      <tr><td><code>пусть :x 10</code></td><td>переменная</td></tr>
+      <tr><td><code>цвет 120</code>, <code>толщина 3</code></td><td>оттенок 0–360, ширина пера</td></tr>
+      <tr><td><code>поднять</code>, <code>опустить</code></td><td>перо: двигаться без следа / со следом</td></tr>
+      <tr><td><code>домой</code>, <code>очистить</code></td><td>в центр / стереть всё</td></tr>
+      <tr><td><code>случайно 10</code></td><td>случайное число от 0 до 9</td></tr>
+    </table>
+    Числа и выражения: <code>+ - * / ( )</code>, сравнения <code>&lt; &gt; =</code>. Комментарий — после <code>;</code>.
+  </details>
+</aside>
+<main><canvas id="c"></canvas></main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+
+  // ================= language =================
+  class LangError extends Error { constructor(msg, line) { super(msg); this.line = line; } }
+
+  const ALIASES = { 'вп': 'вперёд', 'вперед': 'вперёд', 'нд': 'назад', 'лв': 'налево', 'пр': 'направо' };
+  const BUILTINS = {   // name -> number of arguments
+    'вперёд': 1, 'назад': 1, 'налево': 1, 'направо': 1, 'цвет': 1, 'толщина': 1,
+    'поднять': 0, 'опустить': 0, 'домой': 0, 'очистить': 0, 'стоп': 0,
+  };
+
+  function tokenize(src) {
+    const out = [];
+    src.split('\n').forEach((text, li) => {
+      const line = li + 1;
+      text = text.replace(/;.*$/, '');
+      const re = /\s*(?:(\d+(?:\.\d+)?)|(:[\p{L}_][\p{L}\p{N}_]*)|([\p{L}_][\p{L}\p{N}_]*)|([\[\]()+\-*/<>=]))/uy;
+      let m, pos = 0;
+      while (pos < text.length) {
+        re.lastIndex = pos;
+        m = re.exec(text);
+        if (!m) { if (/^\s*$/.test(text.slice(pos))) break; throw new LangError(`Непонятный символ «${text.slice(pos).trim()[0]}»`, line); }
+        pos = re.lastIndex;
+        if (m[1]) out.push({ t: 'num', v: +m[1], line });
+        else if (m[2]) out.push({ t: 'var', v: m[2].slice(1).toLowerCase(), line });
+        else if (m[3]) { const w = m[3].toLowerCase(); out.push({ t: 'word', v: ALIASES[w] || w, line }); }
+        else out.push({ t: 'op', v: m[4], line });
+      }
+    });
+    return out;
+  }
+
+  function parse(tokens) {
+    // pass 1: find user procedures and their arity, so calls can be parsed before definitions
+    const arity = {};
+    for (let i = 0; i < tokens.length; i++) {
+      if (tokens[i].t === 'word' && tokens[i].v === 'это') {
+        const name = tokens[i + 1];
+        if (!name || name.t !== 'word') throw new LangError('После «это» нужно имя команды', tokens[i].line);
+        let n = 0; while (tokens[i + 2 + n] && tokens[i + 2 + n].t === 'var') n++;
+        arity[name.v] = n;
+      }
+    }
+    let p = 0;
+    const peek = () => tokens[p], next = () => tokens[p++];
+    const expectOp = (v) => { const t = next(); if (!t || t.v !== v) throw new LangError(`Ожидалось «${v}»`, t ? t.line : lastLine()); };
+    const lastLine = () => tokens.length ? tokens[tokens.length - 1].line : 1;
+
+    function expr() { return comparison(); }
+    function comparison() {
+      let l = additive();
+      while (peek() && peek().t === 'op' && '<>='.includes(peek().v)) { const op = next().v; l = { k: 'bin', op, l, r: additive() }; }
+      return l;
+    }
+    function additive() {
+      let l = term();
+      while (peek() && peek().t === 'op' && '+-'.includes(peek().v)) { const op = next().v; l = { k: 'bin', op, l, r: term() }; }
+      return l;
+    }
+    function term() {
+      let l = unary();
+      while (peek() && peek().t === 'op' && '*/'.includes(peek().v)) { const op = next().v; l = { k: 'bin', op, l, r: unary() }; }
+      return l;
+    }
+    function unary() {
+      if (peek() && peek().t === 'op' && peek().v === '-') { next(); return { k: 'neg', e: unary() }; }
+      return atom();
+    }
+    function atom() {
+      const t = next();
+      if (!t) throw new LangError('Программа оборвалась, ожидалось число', lastLine());
+      if (t.t === 'num') return { k: 'num', v: t.v };
+      if (t.t === 'var') return { k: 'var', v: t.v, line: t.line };
+      if (t.t === 'op' && t.v === '(') { const e = expr(); expectOp(')'); return e; }
+      if (t.t === 'word' && t.v === 'случайно') return { k: 'rand', e: unary() };
+      throw new LangError(`Ожидалось число, а встретилось «${t.v}»`, t.line);
+    }
+    function block() {
+      const open = next();
+      if (!open || open.v !== '[') throw new LangError('Ожидалась «[»', open ? open.line : lastLine());
+      const body = [];
+      while (peek() && peek().v !== ']') body.push(statement());
+      if (!peek()) throw new LangError('Не хватает закрывающей «]»', open.line);
+      next();
+      return body;
+    }
+    function statement() {
+      const t = next();
+      if (t.t !== 'word') throw new LangError(`Здесь ожидалась команда, а встретилось «${t.v}»`, t.line);
+      const line = t.line, w = t.v;
+      if (w === 'повтори') return { k: 'repeat', n: expr(), body: block(), line };
+      if (w === 'если') {
+        const cond = expr(), then = block();
+        let els = null;
+        if (peek() && peek().t === 'word' && peek().v === 'иначе') { next(); els = block(); }
+        return { k: 'if', cond, then, els, line };
+      }
+      if (w === 'пусть') {
+        const v = next(); if (!v || v.t !== 'var') throw new LangError('После «пусть» нужна переменная вида :имя', line);
+        return { k: 'let', name: v.v, e: expr(), line };
+      }
+      if (w === 'это') {
+        const name = next().v, params = [];
+        while (peek() && peek().t === 'var') params.push(next().v);
+        const body = [];
+        while (peek() && !(peek().t === 'word' && peek().v === 'конец')) body.push(statement());
+        if (!peek()) throw new LangError(`Команда «${name}» не закрыта словом «конец»`, line);
+        next();
+        return { k: 'def', name, params, body, line };
+      }
+      if (w in BUILTINS) return { k: 'cmd', name: w, args: Array.from({ length: BUILTINS[w] }, expr), line };
+      if (w in arity) return { k: 'call', name: w, args: Array.from({ length: arity[w] }, expr), line };
+      throw new LangError(`Не знаю команду «${w}»`, line);
+    }
+    const prog = [];
+    while (p < tokens.length) prog.push(statement());
+    return prog;
+  }
+
+  // The interpreter is a generator: it yields after every move so drawing can be animated.
+  class Stop { }
+  function* run(prog, T) {
+    const procs = {};
+    let steps = 0;
+    function val(e, env) {
+      switch (e.k) {
+        case 'num': return e.v;
+        case 'var': {
+          for (let s = env; s; s = s.parent) if (e.v in s.vars) return s.vars[e.v];
+          throw new LangError(`Переменная :${e.v} ещё не задана`, e.line);
+        }
+        case 'neg': return -val(e.e, env);
+        case 'rand': return Math.floor(Math.random() * val(e.e, env));
+        case 'bin': {
+          const a = val(e.l, env), b = val(e.r, env);
+          switch (e.op) {
+            case '+': return a + b; case '-': return a - b; case '*': return a * b;
+            case '/': return b === 0 ? 0 : a / b;
+            case '<': return a < b ? 1 : 0; case '>': return a > b ? 1 : 0; case '=': return Math.abs(a - b) < 1e-9 ? 1 : 0;
+          }
+        }
+      }
+    }
+    function* exec(body, env, depth) {
+      for (const s of body) {
+        if (++steps > 300000) throw new LangError('Слишком долго: больше 300 000 шагов. Нет ли бесконечной рекурсии?', s.line);
+        switch (s.k) {
+          case 'def': procs[s.name] = s; break;
+          case 'let': {
+            let scope = env; for (let x = env; x; x = x.parent) if (s.name in x.vars) { scope = x; break; }
+            scope.vars[s.name] = val(s.e, env); break;
+          }
+          case 'repeat': {
+            const n = Math.floor(val(s.n, env));
+            for (let i = 1; i <= n; i++) yield* exec(s.body, { vars: { 'номер': i }, parent: env }, depth);
+            break;
+          }
+          case 'if': {
+            if (val(s.cond, env)) yield* exec(s.then, env, depth);
+            else if (s.els) yield* exec(s.els, env, depth);
+            break;
+          }
+          case 'call': {
+            const d = procs[s.name];
+            if (!d) throw new LangError(`Команда «${s.name}» вызвана раньше, чем описана`, s.line);
+            if (depth > 400) throw new LangError('Слишком глубокая рекурсия (больше 400 уровней)', s.line);
+            const vars = {}; d.params.forEach((pn, i) => vars[pn] = val(s.args[i], env));
+            try { yield* exec(d.body, { vars, parent: globals }, depth + 1); }
+            catch (e) { if (!(e instanceof Stop)) throw e; }
+            break;
+          }
+          case 'cmd': {
+            const a = s.args.map(x => val(x, env));
+            if (s.name === 'стоп') throw new Stop();
+            const moved = T[s.name](...a);
+            if (moved) yield;
+            break;
+          }
+        }
+      }
+    }
+    const globals = { vars: {}, parent: null };
+    try { yield* exec(prog, globals, 0); }
+    catch (e) { if (!(e instanceof Stop)) throw e; }
+  }
+
+  // ================= turtle & canvas =================
+  const cv = $('c'), ctx = cv.getContext('2d');
+  const ink = document.createElement('canvas'), ix = ink.getContext('2d');
+  let W = 0, H = 0, dpr = 1;
+  const T = {
+    x: 0, y: 0, h: 0, down: true, hue: 140, width: 2,
+    line(x1, y1, x2, y2) {
+      if (!this.down) return;
+      ix.strokeStyle = `hsl(${this.hue}, 75%, 62%)`; ix.lineWidth = this.width; ix.lineCap = 'round';
+      ix.beginPath(); ix.moveTo(W / 2 + x1, H / 2 - y1); ix.lineTo(W / 2 + x2, H / 2 - y2); ix.stroke();
+    },
+    'вперёд'(d) { const r = this.h * Math.PI / 180, nx = this.x + Math.sin(r) * d, ny = this.y + Math.cos(r) * d; this.line(this.x, this.y, nx, ny); this.x = nx; this.y = ny; return true; },
+    'назад'(d) { return this['вперёд'](-d); },
+    'налево'(a) { this.h -= a; },
+    'направо'(a) { this.h += a; },
+    'цвет'(c) { this.hue = ((c % 360) + 360) % 360; },
+    'толщина'(w) { this.width = Math.max(0.5, w); },
+    'поднять'() { this.down = false; },
+    'опустить'() { this.down = true; },
+    'домой'() { this.x = 0; this.y = 0; this.h = 0; return true; },
+    'очистить'() { ix.clearRect(0, 0, W, H); return true; },
+    reset() { Object.assign(this, { x: 0, y: 0, h: 0, down: true, hue: 140, width: 2 }); ix.clearRect(0, 0, W, H); },
+  };
+
+  function resize() {
+    const r = cv.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    dpr = Math.min(devicePixelRatio || 1, 2);
+    const old = W ? ix.getImageData(0, 0, ink.width, ink.height) : null;
+    W = r.width; H = r.height;
+    for (const c of [cv, ink]) { c.width = W * dpr; c.height = H * dpr; }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ix.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (old) ix.putImageData(old, 0, 0);
+  }
+
+  function render() {
+    if (!W || !H) return;   // not laid out yet
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(ink, 0, 0, W, H);
+    // the turtle itself
+    const x = W / 2 + T.x, y = H / 2 - T.y, r = T.h * Math.PI / 180;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(r);
+    ctx.fillStyle = '#8fd18a'; ctx.strokeStyle = '#0f1013'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(0, -11); ctx.lineTo(7, 7); ctx.lineTo(0, 3); ctx.lineTo(-7, 7); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  // ================= running =================
+  let gen = null;
+  function status(msg, err) { $('status').textContent = msg; $('status').classList.toggle('err', !!err); }
+  function start() {
+    try {
+      const prog = parse(tokenize($('code').value));
+      T.reset();
+      gen = run(prog, T);
+      status('Рисую…');
+    } catch (e) { fail(e); }
+  }
+  function fail(e) {
+    gen = null;
+    if (e instanceof LangError) {
+      status(`Строка ${e.line}: ${e.message}`, true);
+      // put the cursor on the offending line
+      const lines = $('code').value.split('\n'), pos = lines.slice(0, e.line - 1).join('\n').length + (e.line > 1 ? 1 : 0);
+      $('code').focus(); $('code').setSelectionRange(pos, pos + (lines[e.line - 1] || '').length);
+    } else { status('Внутренняя ошибка: ' + e.message, true); console.error(e); }
+  }
+  function tick() {
+    requestAnimationFrame(tick);   // schedule first, so one bad frame can't kill the loop
+    if (gen) {
+      const s = +$('speed').value;
+      // speed 1..100 -> 1 to ~2000 moves per frame, exponential so the slider feels even
+      const n = Math.max(1, Math.round(Math.pow(2000, (s - 1) / 99)));
+      try {
+        for (let i = 0; i < n; i++) { if (gen.next().done) { gen = null; status('Готово.'); break; } }
+      } catch (e) { fail(e); }
+    }
+    render();
+  }
+
+  // ================= examples =================
+  const EXAMPLES = {
+    'Звезда': `; пятиконечная звезда
+цвет 45
+толщина 3
+повтори 5 [
+  вперёд 200
+  направо 144
+]`,
+    'Радужная спираль': `; каждый шаг чуть длиннее и чуть другого цвета
+повтори 360 [
+  цвет :номер
+  вперёд :номер / 1.5
+  направо 59
+]`,
+    'Снежинка Коха': `это кох :длина :уровень
+  если :уровень = 0 [ вперёд :длина стоп ]
+  кох :длина / 3 :уровень - 1
+  налево 60
+  кох :длина / 3 :уровень - 1
+  направо 120
+  кох :длина / 3 :уровень - 1
+  налево 60
+  кох :длина / 3 :уровень - 1
+конец
+
+поднять назад 170 налево 90 вперёд 98 направо 90 опустить
+цвет 200
+повтори 3 [
+  кох 340 4
+  направо 120
+]`,
+    'Дерево': `; рекурсия: каждая ветка — маленькое дерево
+это ветка :длина
+  если :длина < 6 [ стоп ]
+  толщина :длина / 9
+  цвет 25 + 100 * (:длина < 20)
+  вперёд :длина
+  налево 25
+  ветка :длина * 0.72
+  направо 50
+  ветка :длина * 0.68
+  налево 25
+  поднять назад :длина опустить
+конец
+
+поднять назад 220 опустить
+ветка 120`,
+    'Цветок': `это лепесток
+  повтори 2 [
+    повтори 60 [ вперёд 3 направо 1.5 ]
+    направо 90
+  ]
+конец
+
+толщина 2
+повтори 18 [
+  цвет 300 + :номер * 4
+  лепесток
+  направо 20
+]`,
+    'Случайная прогулка': `толщина 2
+повтори 3000 [
+  цвет :номер / 8
+  вперёд 6
+  направо (случайно 3 - 1) * 90
+]`,
+  };
+  for (const name of Object.keys(EXAMPLES)) {
+    const o = document.createElement('option'); o.textContent = name; $('examples').append(o);
+  }
+  $('examples').onchange = () => { $('code').value = EXAMPLES[$('examples').value]; start(); };
+
+  $('run').onclick = start;
+  $('stop').onclick = () => { if (gen) { gen = null; status('Остановлено.'); } };
+  $('code').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); start(); }
+    if (e.key === 'Tab') { e.preventDefault(); document.execCommand('insertText', false, '  '); }
+  });
+  new ResizeObserver(resize).observe(cv);
+
+  // exposed for automated tests only
+  window.__turtle = { tokenize, parse, run, LangError, EXAMPLES };
+
+  resize();
+  $('examples').value = 'Дерево';
+  $('code').value = EXAMPLES['Дерево'];
+  start();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
