@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Лучи</title>
+<style>
+  :root { --bg: #070a12; --fg: #ebe6da; --dim: #848aa0; --line: rgba(255,255,255,.1); --warm: #ffd98a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: radial-gradient(ellipse at 50% 30%, #121828, #06080e 75%) fixed; color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 16px; gap: 14px; }
+  header { text-align: center; }
+  h1 { margin: 0; font-size: 22px; font-weight: 600; color: var(--warm); letter-spacing: .02em; }
+  .sub { color: var(--dim); margin-top: 2px; }
+  .bar { display: flex; gap: 14px; align-items: center; color: var(--dim); font-variant-numeric: tabular-nums; flex-wrap: wrap; justify-content: center; }
+  .bar b { color: var(--fg); font-weight: 600; }
+  button { font: inherit; color: var(--fg); background: rgba(255,255,255,.05); border: 1px solid var(--line); border-radius: 8px; padding: 4px 12px; cursor: pointer; }
+  button:hover { background: rgba(255,255,255,.1); }
+  button.go { border-color: #6b5424; color: var(--warm); background: #2a2212; }
+  canvas { touch-action: manipulation; cursor: pointer; border-radius: 14px; }
+  #win { min-height: 34px; display: flex; gap: 10px; align-items: center; }
+  #win span { color: var(--warm); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Лучи</h1>
+  <div class="sub">Поворачивайте зеркала кликом. Зажгите все кристаллы одним лучом.</div>
+</header>
+<div class="bar">
+  <span>Уровень <b id="lvl">1</b></span>
+  <span>Ходы <b id="moves">0</b></span>
+  <span>Кристаллы <b id="lit">0/0</b></span>
+  <button id="restart">Заново</button>
+</div>
+<canvas id="c"></canvas>
+<div id="win"></div>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const cv = $('c'), ctx = cv.getContext('2d');
+
+  // cell kinds: '.' empty, '/' '\' mirrors, '#' wall. Targets live in a separate set (the beam passes through them).
+  let N, grid, locked, targets, source, level = 1, moves = 0, solved = false, anim = {}, cell, pad;
+  try { level = Math.max(1, +localStorage.getItem('rays-level') || 1); } catch (e) {}
+
+  const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+  const reflect = (m, [dx, dy]) => m === '/' ? [-dy, -dx] : [dy, dx];   // screen coords, y grows downward
+  const inside = (x, y) => x >= 0 && y >= 0 && x < N && y < N;
+
+  function rnd(n) { return Math.floor(Math.random() * n); }
+
+  // Build a solvable level: walk a beam path, put correctly-oriented mirrors at its turns,
+  // targets on it, then scramble the mirrors and sprinkle decoys and walls off the path.
+  function generate(lv) {
+    for (let attempt = 0; attempt < 400; attempt++) {
+      N = Math.min(9, 5 + Math.floor((lv - 1) / 3));
+      const wantTurns = Math.min(3 + lv, 4 + N);
+      const g = Array.from({ length: N }, () => Array(N).fill('.'));
+      const onPath = new Set(), turnCells = [];
+      let x = 0, y = rnd(N), d = [1, 0];
+      const src = { x: -1, y, d: [1, 0] };
+      onPath.add(x + ',' + y);
+      let turns = 0, ok = true, steps = 0;
+      while (turns < wantTurns && steps < 200) {
+        steps++;
+        // go straight a few cells, then turn at a fresh cell
+        const run = 1 + rnd(3);
+        let moved = 0;
+        for (let k = 0; k < run; k++) {
+          const nx = x + d[0], ny = y + d[1];
+          if (!inside(nx, ny) || g[ny][nx] !== '.') break;
+          x = nx; y = ny; onPath.add(x + ',' + y); moved++;
+        }
+        const nd = Math.random() < 0.5 ? [d[1], d[0]] : [-d[1], -d[0]];   // perpendicular
+        const nx = x + nd[0], ny = y + nd[1];
+        if (!inside(nx, ny) || g[ny][nx] !== '.') continue;
+        g[y][x] = (-d[1] === nd[0] && -d[0] === nd[1]) ? '/' : '\\';
+        turnCells.push([x, y]); d = nd; turns++;
+        x = nx; y = ny; onPath.add(x + ',' + y);
+      }
+      if (!ok || turns < Math.min(3, wantTurns)) continue;
+      if (g[y][x] !== '.') continue;
+      const solution = g.map(r => r.slice());
+
+      // the end of the path is always a target; add more on straight stretches
+      const T = new Set([x + ',' + y]);
+      const straight = [...onPath].filter(k => { const [a, b] = k.split(',').map(Number); return g[b][a] === '.' && !T.has(k); });
+      const extra = Math.min(straight.length, Math.floor(lv / 2) + 1);
+      for (let i = 0; i < extra; i++) T.add(straight.splice(rnd(straight.length), 1)[0]);
+
+      // check the intended solution really lights every target
+      grid = solution; targets = T; source = src;
+      const sol = trace();
+      if (sol.hit.size !== T.size) continue;
+
+      // decoy mirrors and walls only on cells the solution beam never touches
+      // (use the traced beam, not the planned walk: a turn on a crossing can bend the earlier path)
+      const free = [];
+      for (let yy = 0; yy < N; yy++) for (let xx = 0; xx < N; xx++) if (!sol.cells.has(xx + ',' + yy)) free.push([xx, yy]);
+      const decoys = Math.min(free.length, 2 + Math.floor(lv * 0.9));
+      for (let i = 0; i < decoys; i++) { const [a, b] = free.splice(rnd(free.length), 1)[0]; g[b][a] = Math.random() < 0.5 ? '/' : '\\'; }
+      const walls = Math.min(free.length, Math.floor(lv / 2));
+      for (let i = 0; i < walls; i++) { const [a, b] = free.splice(rnd(free.length), 1)[0]; g[b][a] = '#'; }
+
+      // lock a few solution mirrors as hints on early levels
+      const L = new Set();
+      const hints = Math.max(0, 2 - Math.floor(lv / 3));
+      for (let i = 0; i < hints && turnCells.length > 2; i++) { const [a, b] = turnCells[rnd(turnCells.length)]; L.add(a + ',' + b); }
+
+      // scramble every unlocked mirror, and make sure the start isn't already solved
+      for (let yy = 0; yy < N; yy++) for (let xx = 0; xx < N; xx++) {
+        if ((g[yy][xx] === '/' || g[yy][xx] === '\\') && !L.has(xx + ',' + yy) && Math.random() < 0.6) g[yy][xx] = g[yy][xx] === '/' ? '\\' : '/';
+      }
+      grid = g; locked = L;
+      if (trace().hit.size === T.size) { const [a, b] = turnCells.find(([a, b]) => !L.has(a + ',' + b)) || []; if (a === undefined) continue; flip(a, b); }
+      if (trace().hit.size === T.size) continue;
+      return { solution };
+    }
+    throw new Error('не удалось построить уровень');
+  }
+
+  function flip(x, y) { grid[y][x] = grid[y][x] === '/' ? '\\' : '/'; }
+
+  // Follow the beam cell by cell; returns the polyline and which targets it lit.
+  function trace() {
+    const pts = [[source.x + 0.5, source.y + 0.5]], hit = new Set(), seen = new Set(), cells = new Set();
+    let x = source.x, y = source.y, d = source.d;
+    for (let i = 0; i < 4 * N * N + 4; i++) {
+      x += d[0]; y += d[1];
+      if (!inside(x, y)) { pts.push([x + 0.5 - d[0] * 0.5, y + 0.5 - d[1] * 0.5]); break; }
+      const c = grid[y][x], k = x + ',' + y;
+      cells.add(k);
+      if (targets.has(k)) hit.add(k);
+      if (c === '#') { pts.push([x + 0.5 - d[0] * 0.5, y + 0.5 - d[1] * 0.5]); break; }
+      if (c === '/' || c === '\\') {
+        pts.push([x + 0.5, y + 0.5]);
+        const sk = k + ':' + d;
+        if (seen.has(sk)) break;   // closed loop
+        seen.add(sk);
+        d = reflect(c, d);
+      }
+    }
+    return { pts, hit, cells };
+  }
+
+  // ---------- drawing ----------
+  function layout() {
+    const size = Math.min(innerWidth - 32, innerHeight - 190, 620);
+    pad = size * 0.09; cell = (size - pad * 2) / N;
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    cv.style.width = size + 'px'; cv.style.height = size + 'px';
+    cv.width = size * dpr; cv.height = size * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  const P = (gx, gy) => [pad + gx * cell, pad + gy * cell];
+
+  function draw(t) {
+    const size = pad * 2 + cell * N;
+    ctx.clearRect(0, 0, size, size);
+    ctx.fillStyle = 'rgba(12,16,28,.9)';
+    ctx.beginPath(); ctx.roundRect(0, 0, size, size, 14); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,.05)'; ctx.lineWidth = 1;
+    for (let i = 0; i <= N; i++) {
+      ctx.beginPath(); ctx.moveTo(pad + i * cell, pad); ctx.lineTo(pad + i * cell, pad + N * cell); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(pad, pad + i * cell); ctx.lineTo(pad + N * cell, pad + i * cell); ctx.stroke();
+    }
+    const { pts, hit } = trace();
+
+    // walls
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) if (grid[y][x] === '#') {
+      const [px, py] = P(x, y);
+      ctx.fillStyle = '#2a2f3e'; ctx.beginPath(); ctx.roundRect(px + 4, py + 4, cell - 8, cell - 8, 6); ctx.fill();
+      ctx.fillStyle = '#353b4d'; ctx.fillRect(px + 8, py + cell * 0.45, cell - 16, 2);
+    }
+
+    // beam
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    for (const [w, a] of [[cell * 0.32, 0.08], [cell * 0.14, 0.22], [3, 0.95]]) {
+      ctx.strokeStyle = solved ? `rgba(255,236,170,${a})` : `rgba(255,214,130,${a})`; ctx.lineWidth = w;
+      ctx.beginPath(); pts.forEach(([gx, gy], i) => { const [px, py] = P(gx, gy); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }); ctx.stroke();
+    }
+    ctx.restore();
+
+    // targets: crystals that light up
+    for (const k of targets) {
+      const [x, y] = k.split(',').map(Number), [px, py] = P(x + 0.5, y + 0.5), on = hit.has(k), r = cell * 0.2;
+      if (on) {
+        const g = ctx.createRadialGradient(px, py, 0, px, py, cell * 0.7);
+        g.addColorStop(0, 'rgba(140,230,255,.55)'); g.addColorStop(1, 'rgba(140,230,255,0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, cell * 0.7, 0, 7); ctx.fill();
+      }
+      const wob = on ? Math.sin(t / 300 + x + y) * 0.08 : 0;
+      ctx.fillStyle = on ? '#bff1ff' : '#30495a'; ctx.strokeStyle = on ? '#e9fbff' : '#4d6a7d'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(px, py - r * (1.25 + wob)); ctx.lineTo(px + r, py); ctx.lineTo(px, py + r * (1.25 + wob)); ctx.lineTo(px - r, py); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+    }
+
+    // mirrors (with a quick rotation animation after a click)
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      const c = grid[y][x]; if (c !== '/' && c !== '\\') continue;
+      const [px, py] = P(x + 0.5, y + 0.5), k = x + ',' + y, isLocked = locked.has(k);
+      let ang = c === '/' ? -Math.PI / 4 : Math.PI / 4;
+      if (anim[k]) { const p = Math.min(1, (t - anim[k]) / 160); ang += (1 - p) * Math.PI / 2 * (c === '/' ? 1 : -1); if (p >= 1) delete anim[k]; }
+      ctx.save(); ctx.translate(px, py); ctx.rotate(ang);
+      const L = cell * 0.36;
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = isLocked ? '#6f7891' : '#dfe7f5'; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(-L, 0); ctx.lineTo(L, 0); ctx.stroke();
+      ctx.strokeStyle = isLocked ? 'rgba(111,120,145,.4)' : 'rgba(140,170,220,.45)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(-L, 4); ctx.lineTo(L, 4); ctx.stroke();
+      ctx.restore();
+      if (isLocked) { ctx.fillStyle = '#6f7891'; ctx.beginPath(); ctx.arc(px, py, 3, 0, 7); ctx.fill(); }
+    }
+
+    // the lighthouse lamp at the edge
+    const [sx, sy] = P(source.x + 0.5, source.y + 0.5);
+    const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, cell * 0.6);
+    g.addColorStop(0, 'rgba(255,230,160,.8)'); g.addColorStop(1, 'rgba(255,230,160,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(sx, sy, cell * 0.6, 0, 7); ctx.fill();
+    ctx.fillStyle = '#ffe9b0'; ctx.beginPath(); ctx.arc(sx, sy, cell * 0.16, 0, 7); ctx.fill();
+
+    $('lit').textContent = `${hit.size}/${targets.size}`;
+    if (!solved && hit.size === targets.size) win();
+  }
+
+  // ---------- sound (tiny) ----------
+  let ac = null;
+  function tone(f, dur, vol, type = 'sine', when = 0) {
+    try {
+      ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+      const t = ac.currentTime + when, o = ac.createOscillator(), g = ac.createGain();
+      o.type = type; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g); g.connect(ac.destination); o.start(t); o.stop(t + dur + 0.05);
+    } catch (e) {}
+  }
+
+  function win() {
+    solved = true;
+    [0, 4, 7, 12].forEach((s, i) => tone(523.25 * Math.pow(2, s / 12), 0.9, 0.12, 'sine', i * 0.09));
+    $('win').innerHTML = `<span>Все кристаллы горят${moves ? `, ходов: ${moves}` : ''}.</span> <button class="go" id="next">Следующий уровень →</button>`;
+    $('next').onclick = () => { level++; try { localStorage.setItem('rays-level', level); } catch (e) {} start(); };
+  }
+
+  let initial = null;   // the scrambled starting position, for "Заново"
+  function start(keep) {
+    if (!keep) { generate(level); initial = grid.map(r => r.slice()); }
+    moves = 0; solved = false; anim = {};
+    $('lvl').textContent = level; $('moves').textContent = 0; $('win').innerHTML = '';
+    layout();
+  }
+  $('restart').onclick = () => { grid = initial.map(r => r.slice()); start(true); };
+
+  cv.addEventListener('click', e => {
+    if (solved) return;
+    const r = cv.getBoundingClientRect();
+    const x = Math.floor((e.clientX - r.left - pad) / cell), y = Math.floor((e.clientY - r.top - pad) / cell);
+    if (!inside(x, y)) return;
+    const c = grid[y][x], k = x + ',' + y;
+    if ((c === '/' || c === '\\') && !locked.has(k)) {
+      flip(x, y); anim[k] = performance.now(); moves++; $('moves').textContent = moves;
+      tone(c === '/' ? 660 : 587, 0.12, 0.05, 'triangle');
+    }
+  });
+  addEventListener('resize', layout);
+  addEventListener('keydown', e => { if (e.key === 'Enter' && solved) $('next').click(); });
+
+  window.__rays = { generate, trace, get grid() { return grid; }, set grid(g) { grid = g; }, get targets() { return targets; }, get N() { return N; } };
+
+  start();
+  (function loop(t) { requestAnimationFrame(loop); draw(t); })(performance.now());
+})();
+</script>
+</body>
+</html>

@@ -31,9 +31,54 @@
 <body>
 <main>
   <h1>Песочница</h1>
-  <p class="lead">Что получилось, когда мне сказали «делай тут что хочешь». Шесть заходов, каждый про своё.</p>
+  <p class="lead">Что получилось, когда мне сказали «делай тут что хочешь». Одиннадцать заходов, каждый про своё.</p>
 
   <div class="grid">
+    <a class="card" href="rays.html">
+      <div class="thumb"><canvas class="static" data-draw="rays"></canvas></div>
+      <div class="body">
+        <h2>Лучи</h2>
+        <p>Головоломка: поворачивайте зеркала, чтобы луч маяка зажёг все кристаллы. Уровни бесконечны и всегда решаемы.</p>
+        <span class="tag">canvas · головоломка</span>
+      </div>
+    </a>
+
+    <a class="card" href="clock.html">
+      <div class="thumb"><canvas class="static" data-draw="clock"></canvas></div>
+      <div class="body">
+        <h2>Часы словами</h2>
+        <p>Время по-русски: «без четверти шесть», «двадцать одна минута четвёртого». Грамматика проверена на всех 1440 минутах.</p>
+        <span class="tag">типографика · язык</span>
+      </div>
+    </a>
+
+    <a class="card" href="city.html">
+      <div class="thumb"><canvas class="static" data-draw="city"></canvas></div>
+      <div class="body">
+        <h2>Ночной город</h2>
+        <p>Бесконечная панорама под дождём: параллакс, мокрый асфальт, поезд на эстакаде. Окна можно включать кликом.</p>
+        <span class="tag">canvas · атмосфера</span>
+      </div>
+    </a>
+
+    <a class="card" href="cloth.html">
+      <div class="thumb"><canvas class="static" data-draw="cloth"></canvas></div>
+      <div class="body">
+        <h2>Ткань</h2>
+        <p>Полотно на физике Верле: тяните, режьте ножницами, включайте ветер. Перетянутые нити рвутся сами.</p>
+        <span class="tag">canvas · физика</span>
+      </div>
+    </a>
+
+    <a class="card" href="turtle.html">
+      <div class="thumb"><canvas class="static" data-draw="turtle"></canvas></div>
+      <div class="body">
+        <h2>Черепашка</h2>
+        <p>Маленький язык программирования на русском в духе Logo: циклы, условия, рекурсия. Деревья и снежинки Коха в примерах.</p>
+        <span class="tag">свой язык · обучение</span>
+      </div>
+    </a>
+
     <a class="card" href="patterns.html">
       <div class="thumb"><canvas id="rdThumb"></canvas></div>
       <div class="body">
@@ -122,6 +167,98 @@
     bx.restore();
     bx.fillStyle = '#ffd98a'; bx.beginPath(); bx.arc(ox, oy, 9, 0, 6.28); bx.fill();
   }
+
+  // static thumbnails for the newer pages: drawn once, each a little sketch of its page
+  const STATIC = {
+    turtle(x, W, H) {
+      x.fillStyle = '#121318'; x.fillRect(0, 0, W, H);
+      x.lineCap = 'round';
+      (function branch(px, py, a, len, depth) {
+        if (len < 5) return;
+        const nx = px + Math.sin(a) * len, ny = py - Math.cos(a) * len;
+        x.strokeStyle = len < 22 ? 'hsl(125,60%,58%)' : 'hsl(25,70%,60%)'; x.lineWidth = Math.max(1, len / 8);
+        x.beginPath(); x.moveTo(px, py); x.lineTo(nx, ny); x.stroke();
+        branch(nx, ny, a - 0.44, len * 0.72, depth + 1); branch(nx, ny, a + 0.44, len * 0.68, depth + 1);
+      })(W / 2, H - 14, 0, H * 0.27, 0);
+    },
+    cloth(x, W, H) {
+      x.fillStyle = '#16181e'; x.fillRect(0, 0, W, H);
+      const cols = 26, rows = 15, gap = W * 0.8 / cols, x0 = W * 0.1, y0 = H * 0.12;
+      for (let r = 0; r < rows - 1; r++) for (let c = 0; c < cols - 1; c++) {
+        const p = (cc, rr) => [x0 + cc * gap + Math.sin(rr * 0.5 + cc * 0.2) * rr * 1.6, y0 + rr * gap * 0.92 + Math.sin(cc * 0.55) * rr * 0.9];
+        if (r > 8 && c > 15 && c - 15 < r - 8) continue;   // a cut corner
+        const a = (Math.floor(c / 3) % 2), b = (Math.floor(r / 3) % 2), k = 0.75 + 0.25 * Math.sin(c * 0.55 + 1);
+        const col = c % 6 === 0 || r % 6 === 0 ? [232, 196, 104] : a && b ? [42, 64, 98] : a || b ? [120, 38, 44] : [158, 48, 52];
+        x.fillStyle = `rgb(${col.map(v => v * k | 0)})`; x.strokeStyle = x.fillStyle;
+        const q = [p(c, r), p(c + 1, r), p(c + 1, r + 1), p(c, r + 1)];
+        x.beginPath(); q.forEach(([X, Y], i) => i ? x.lineTo(X, Y) : x.moveTo(X, Y)); x.closePath(); x.fill(); x.stroke();
+      }
+      x.strokeStyle = '#5a5248'; x.lineWidth = 4; x.beginPath(); x.moveTo(x0 - 10, y0 - 5); x.lineTo(x0 + gap * (cols - 1) + 10, y0 - 5); x.stroke();
+    },
+    city(x, W, H) {
+      const g = x.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#05060d'); g.addColorStop(1, '#2a2440');
+      x.fillStyle = g; x.fillRect(0, 0, W, H);
+      x.fillStyle = '#f4ead2'; x.beginPath(); x.arc(W * 0.8, H * 0.2, H * 0.06, 0, 7); x.fill();
+      let s = 7; const r = () => (s = (s * 16807) % 2147483647) / 2147483647;
+      const gy = H * 0.8;
+      for (const [shade, hMax, win] of [[[22, 26, 48], 0.45, 3], [[10, 11, 20], 0.62, 5]]) {
+        for (let px = -10; px < W;) {
+          const w = 30 + r() * 60, h = (0.25 + r() * hMax) * gy;
+          x.fillStyle = `rgb(${shade})`; x.fillRect(px, gy - h, w, h);
+          for (let wy = gy - h + 8; wy < gy - 8; wy += win * 2.4) for (let wx = px + 5; wx < px + w - win - 3; wx += win * 2.2) {
+            x.fillStyle = r() < 0.3 ? 'rgba(255,214,140,.85)' : `rgb(${shade.map(v => v + 14)})`; x.fillRect(wx, wy, win, win * 1.3);
+          }
+          px += w + 4 + r() * 10;
+        }
+      }
+      x.fillStyle = '#0a0b12'; x.fillRect(0, gy, W, H - gy);
+      x.strokeStyle = 'rgba(170,190,230,.3)'; x.beginPath();
+      for (let i = 0; i < 140; i++) { const X = r() * W, Y = r() * H; x.moveTo(X, Y); x.lineTo(X + 2, Y - 10); } x.stroke();
+    },
+    clock(x, W, H) {
+      const g = x.createRadialGradient(W / 2, H * 0.4, 0, W / 2, H * 0.4, W * 0.7);
+      g.addColorStop(0, 'rgb(162,92,74)'); g.addColorStop(1, 'rgb(120,62,52)');
+      x.fillStyle = g; x.fillRect(0, 0, W, H);
+      x.strokeStyle = 'rgba(243,239,230,.12)'; x.lineWidth = 2; x.beginPath(); x.arc(W / 2, H / 2, H * 0.42, 0, 7); x.stroke();
+      x.fillStyle = '#f3efe6'; x.textAlign = 'center'; x.textBaseline = 'middle';
+      const f = H * 0.15, plain = `${f}px Georgia, serif`, ital = `italic ${f}px Georgia, serif`;
+      // lay out the first line by measured widths so the two words never collide
+      x.font = plain; const w1 = x.measureText('без').width, sp = x.measureText(' ').width;
+      x.font = ital; const w2 = x.measureText('четверти').width;
+      const left = W / 2 - (w1 + sp + w2) / 2;
+      x.textAlign = 'left';
+      x.font = plain; x.fillText('без', left, H * 0.47);
+      x.font = ital; x.fillText('четверти', left + w1 + sp, H * 0.47);
+      x.textAlign = 'center'; x.font = plain; x.fillText('шесть', W / 2, H * 0.47 + f * 1.15);
+    },
+    rays(x, W, H) {
+      x.fillStyle = '#0c101c'; x.fillRect(0, 0, W, H);
+      const n = 6, c = H * 0.8 / n, ox = (W - c * n) / 2, oy = H * 0.1;
+      x.strokeStyle = 'rgba(255,255,255,.06)';
+      for (let i = 0; i <= n; i++) { x.beginPath(); x.moveTo(ox + i * c, oy); x.lineTo(ox + i * c, oy + n * c); x.stroke(); x.beginPath(); x.moveTo(ox, oy + i * c); x.lineTo(ox + n * c, oy + i * c); x.stroke(); }
+      const P = (gx, gy) => [ox + (gx + 0.5) * c, oy + (gy + 0.5) * c];
+      const path = [[-1, 1], [3, 1], [3, 4], [1, 4], [1, 6]];
+      x.globalCompositeOperation = 'lighter';
+      for (const [w, a] of [[c * 0.3, 0.1], [c * 0.12, 0.25], [2.5, 0.95]]) {
+        x.strokeStyle = `rgba(255,214,130,${a})`; x.lineWidth = w; x.lineJoin = 'round';
+        x.beginPath(); path.forEach(([gx, gy], i) => { const [X, Y] = P(gx, gy); i ? x.lineTo(X, Y) : x.moveTo(X, Y); }); x.stroke();
+      }
+      x.globalCompositeOperation = 'source-over';
+      for (const [gx, gy, m] of [[3, 1, '\\'], [3, 4, '/'], [1, 4, '/'], [5, 2, '/'], [0, 3, '\\'], [4, 0, '\\']]) {
+        const [X, Y] = P(gx, gy), L = c * 0.36, s = m === '/' ? -1 : 1;
+        x.lineCap = 'round';
+        for (const [col, lw] of [['#0c101c', 7], ['#dfe7f5', 3]]) {   // dark outline keeps mirrors readable on top of the beam
+          x.strokeStyle = col; x.lineWidth = lw; x.beginPath(); x.moveTo(X - L * 0.7, Y - L * 0.7 * s); x.lineTo(X + L * 0.7, Y + L * 0.7 * s); x.stroke();
+        }
+      }
+      for (const [gx, gy, on] of [[1, 1, 1], [3, 3, 1], [5, 5, 0]]) {
+        const [X, Y] = P(gx, gy), r = c * 0.2;
+        x.fillStyle = on ? '#bff1ff' : '#30495a'; x.beginPath(); x.moveTo(X, Y - r * 1.25); x.lineTo(X + r, Y); x.lineTo(X, Y + r * 1.25); x.lineTo(X - r, Y); x.fill();
+      }
+      const [sx, sy] = P(-1, 1); x.fillStyle = '#ffe9b0'; x.beginPath(); x.arc(sx + c * 0.3, sy, c * 0.15, 0, 7); x.fill();
+    },
+  };
+  document.querySelectorAll('canvas.static').forEach(c => { const x = fit(c); STATIC[c.dataset.draw](x, c.width, c.height); });
 
   // the same Gray–Scott model as patterns.html, but tiny and on the CPU
   const rc = document.getElementById('rdThumb'), rx = fit(rc);

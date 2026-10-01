@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Часы словами</title>
+<style>
+  :root { --fg: #f3efe6; --dim: rgba(243,239,230,.55); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; color: var(--fg); font-family: Georgia, 'Times New Roman', serif; overflow: hidden; }
+  body { background: #101426; transition: background 2s linear; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 16px; }
+  #phrase {
+    font-size: clamp(34px, 7.5vw, 92px); line-height: 1.12; text-align: center; max-width: 13em;
+    letter-spacing: -.01em; min-height: 2.3em; display: flex; flex-wrap: wrap; justify-content: center; align-content: center; gap: 0 .28em;
+  }
+  #phrase span { display: inline-block; transition: opacity .6s ease, transform .6s ease, filter .6s ease; }
+  #phrase span.enter { opacity: 0; transform: translateY(.35em); filter: blur(6px); }
+  #phrase span.hl { font-style: italic; }
+  #meta { margin-top: 26px; font: 15px/1.5 system-ui, sans-serif; color: var(--dim); letter-spacing: .04em; text-align: center; }
+  #ring { position: fixed; inset: 0; pointer-events: none; }
+  #scrub {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); width: min(560px, calc(100vw - 32px));
+    font: 13px/1.4 system-ui, sans-serif; color: var(--dim); text-align: center; opacity: .3; transition: opacity .3s;
+  }
+  #scrub:hover, #scrub.active { opacity: 1; }
+  #scrub input { width: 100%; accent-color: #f3d27a; }
+  #scrub button { font: inherit; color: var(--fg); background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.15); border-radius: 7px; padding: 2px 10px; cursor: pointer; margin-left: 6px; }
+</style>
+</head>
+<body>
+<canvas id="ring"></canvas>
+<div id="phrase"></div>
+<div id="meta"></div>
+<div id="scrub">
+  <input id="t" type="range" min="0" max="1439" step="1">
+  <div><span id="scrubLabel">Потяните, чтобы увидеть любое время</span><button id="live" hidden>Вернуться к сейчас</button></div>
+</div>
+<script>
+// ---------- Russian time in words ----------
+const RuTime = (() => {
+  const UNITS_F = ['', 'одна', 'две', 'три', 'четыре', 'пять', 'шесть', 'семь', 'восемь', 'девять', 'десять',
+    'одиннадцать', 'двенадцать', 'тринадцать', 'четырнадцать', 'пятнадцать', 'шестнадцать', 'семнадцать', 'восемнадцать', 'девятнадцать'];
+  const TENS = ['', '', 'двадцать', 'тридцать', 'сорок', 'пятьдесят'];
+  const GEN = ['', 'одной', 'двух', 'трёх', 'четырёх', 'пяти', 'шести', 'семи', 'восьми', 'девяти', 'десяти',
+    'одиннадцати', 'двенадцати', 'тринадцати', 'четырнадцати', 'пятнадцати', 'шестнадцати', 'семнадцати', 'восемнадцати', 'девятнадцати', 'двадцати'];
+  const HOUR_NOM = ['двенадцать', 'час', 'два', 'три', 'четыре', 'пять', 'шесть', 'семь', 'восемь', 'девять', 'десять', 'одиннадцать', 'двенадцать'];
+  const HOUR_ORD_GEN = ['двенадцатого', 'первого', 'второго', 'третьего', 'четвёртого', 'пятого', 'шестого', 'седьмого', 'восьмого', 'девятого', 'десятого', 'одиннадцатого', 'двенадцатого'];
+
+  // "минута" agrees with the last word of the number: 1 → минута, 2–4 → минуты, else минут (11–14 are always минут)
+  function minuteNoun(n) {
+    const d = n % 10, dd = n % 100;
+    if (dd >= 11 && dd <= 14) return 'минут';
+    if (d === 1) return 'минута';
+    if (d >= 2 && d <= 4) return 'минуты';
+    return 'минут';
+  }
+  function hourNoun(h) { return h === 1 ? '' : (h >= 2 && h <= 4) ? 'часа' : 'часов'; }
+  function femNumber(n) { return n < 20 ? UNITS_F[n] : TENS[Math.floor(n / 10)] + (n % 10 ? ' ' + UNITS_F[n % 10] : ''); }
+
+  // returns an array of words; words marked with * are the "key" word to emphasise
+  function words(h24, m) {
+    if (m === 0) {
+      if (h24 === 0) return ['*полночь'];
+      if (h24 === 12) return ['*полдень'];
+      const h = h24 % 12 || 12;
+      return ['ровно', '*' + HOUR_NOM[h], hourNoun(h)].filter(Boolean);
+    }
+    const h = h24 % 12, next = (h % 12) + 1;   // next hour on a 12-hour dial, 1..12
+    if (m === 15) return ['*четверть', HOUR_ORD_GEN[next]];
+    if (m === 30) return ['*половина', HOUR_ORD_GEN[next]];
+    if (m === 45) return ['без', '*четверти', HOUR_NOM[next]];
+    if (m < 40) return [...femNumber(m).split(' ').map((w, i, a) => i === a.length - 1 ? '*' + w : w), minuteNoun(m), HOUR_ORD_GEN[next]];
+    const left = 60 - m;                       // 1..20
+    // "без двух минут четыре" for 1–4, then the noun is usually dropped: "без пяти четыре"
+    return ['без', '*' + GEN[left], ...(left <= 4 ? ['минуты'.slice(0, left === 1 ? 6 : 5)] : []), HOUR_NOM[next]];
+  }
+  function partOfDay(h) { return h < 4 ? 'ночь' : h < 12 ? 'утро' : h < 17 ? 'день' : 'вечер'; }
+  return { words, partOfDay };
+})();
+
+// ---------- view ----------
+(() => {
+  const $ = id => document.getElementById(id);
+  const phrase = $('phrase');
+  let override = null, lastKey = '';
+
+  function now() {
+    const d = new Date();
+    if (override === null) return d;
+    const o = new Date(d); o.setHours(Math.floor(override / 60), override % 60, 0, 0); return o;
+  }
+
+  function render(d) {
+    const h = d.getHours(), m = d.getMinutes();
+    const key = h + ':' + m;
+    if (key === lastKey) return;
+    const old = [...phrase.children].map(s => s.textContent);
+    const ws = RuTime.words(h, m);
+    phrase.innerHTML = '';
+    ws.forEach((w, i) => {
+      const s = document.createElement('span');
+      const hl = w.startsWith('*'); s.textContent = hl ? w.slice(1) : w;
+      if (hl) s.className = 'hl';
+      // only words that actually changed get the entrance animation
+      if (lastKey && old[i] !== s.textContent) { s.classList.add('enter'); requestAnimationFrame(() => requestAnimationFrame(() => s.classList.remove('enter'))); }
+      phrase.append(s);
+    });
+    lastKey = key;
+    const date = d.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+    $('meta').textContent = `${date} · ${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} · ${RuTime.partOfDay(h)}`;
+    document.body.style.background = skyColor(h + m / 60);
+    if (override === null) $('t').value = h * 60 + m;
+  }
+
+  // background follows the sky: night indigo → dawn rose → day blue → dusk amber
+  const SKY = [[0, [12, 14, 32]], [5, [28, 24, 58]], [7, [120, 70, 90]], [9, [44, 82, 128]], [13, [38, 92, 140]], [17, [52, 70, 112]], [19, [140, 70, 52]], [21, [36, 28, 64]], [24, [12, 14, 32]]];
+  function skyColor(x) {
+    for (let i = 0; i < SKY.length - 1; i++) {
+      const [a, ca] = SKY[i], [b, cb] = SKY[i + 1];
+      if (x >= a && x <= b) {
+        const k = (x - a) / (b - a), c = ca.map((v, j) => Math.round(v + (cb[j] - v) * k));
+        return `radial-gradient(ellipse at 50% 40%, rgb(${c.map(v => Math.min(255, v + 22))}), rgb(${c}) 70%)`;
+      }
+    }
+  }
+
+  // thin seconds ring around the whole screen edge
+  const cv = $('ring'), ctx = cv.getContext('2d');
+  function ring(d) {
+    const dpr = Math.min(devicePixelRatio || 1, 2), W = innerWidth, H = innerHeight;
+    if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+    const r = Math.min(W, H) * 0.44, cx = W / 2, cy = H / 2;
+    const s = override === null ? d.getSeconds() + d.getMilliseconds() / 1000 : 0;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(243,239,230,.08)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = 'rgba(243,210,122,.55)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * s / 60); ctx.stroke();
+    const a = -Math.PI / 2 + Math.PI * 2 * s / 60;
+    ctx.fillStyle = 'rgba(243,210,122,.9)'; ctx.beginPath(); ctx.arc(cx + Math.cos(a) * r, cy + Math.sin(a) * r, 3, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function loop() { requestAnimationFrame(loop); const d = now(); render(d); ring(d); }
+
+  $('t').addEventListener('input', () => {
+    override = +$('t').value; $('live').hidden = false; $('scrub').classList.add('active');
+    $('scrubLabel').textContent = 'Время выбрано вручную';
+  });
+  $('live').onclick = () => { override = null; $('live').hidden = true; $('scrub').classList.remove('active'); $('scrubLabel').textContent = 'Потяните, чтобы увидеть любое время'; };
+
+  render(now());
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
